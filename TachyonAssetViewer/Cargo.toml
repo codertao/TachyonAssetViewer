@@ -1,0 +1,21 @@
+[package]
+name = "tachyon_asset_viewer"
+version = "0.1.0"
+edition = "2021"
+description = "Viewer for Tachyon: The Fringe PAK/OCF 3D models"
+
+[[bin]]
+name = "tachyon-asset-viewer"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "=0.31.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui_glow = "=0.31.1"
+memmap2 = "0.9"
+anyhow = "1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
