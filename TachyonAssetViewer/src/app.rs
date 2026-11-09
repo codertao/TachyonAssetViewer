@@ -1,6 +1,7 @@
 //! egui front end: asset list on the left, 3D view on the right.
 
 use crate::audio::Audio;
+use crate::music;
 use crate::gate::{self, GateMode};
 use crate::pwf::{Bank, Sound};
 use std::collections::HashMap;
@@ -189,7 +190,10 @@ impl ViewerApp {
             show_fog: true,
             gates: 0,
             gate_mode: opts.gates.unwrap_or(GateMode::Open),
-            sound: GateAudio { on: !opts.mute && opts.screenshot.is_none(), ..Default::default() },
+            sound: {
+                let on = !opts.mute && opts.screenshot.is_none();
+                GateAudio { on, music_on: on, ..Default::default() }
+            },
             lightning: None,
             sheets: FogSheets::default(),
             prev_cam: None,
@@ -529,6 +533,21 @@ impl ViewerApp {
                      animation sounds while cycling",
                 );
             }
+            if self.source.is_some() {
+                let tip = match (&self.sound.music_error, self.sound.now_playing()) {
+                    (Some(e), _) => format!("Music unavailable: {e}"),
+                    (None, Some(n)) => format!(
+                        "In-flight music: Ttfmusic.sbf segments sequenced by the game's TTFMUSIC.BIN script. \
+                         A random theme plays (script state {}), then another.\nNow: {}",
+                        n.theme, n.segment
+                    ),
+                    (None, None) => "In-flight music from Ttfmusic.sbf, sequenced by the game's TTFMUSIC.BIN script".into(),
+                };
+                ui.checkbox(&mut self.sound.music_on, "Music").on_hover_text(tip);
+                if self.sound.music.is_some() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                }
+            }
             if self.fog.is_some() {
                 ui.checkbox(&mut self.show_fog, "Fog")
                     .on_hover_text("The BDF's [fog]: depth fade to the fog colour, plus drifting fog sheets");
@@ -642,6 +661,7 @@ impl ViewerApp {
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or_else(|| ui.input(|i| i.time) as f32);
         if let Some(src) = &self.source {
+            self.sound.update_music(src);
             self.sound.update(src, time, self.gate_mode, self.camera.eye(), self.camera.target);
         }
         let flash = self.lightning.as_mut().map(|l| {
@@ -754,9 +774,55 @@ struct GateAudio {
     samples: HashMap<String, Option<Arc<Sound>>>,
     last: Option<f32>,
     playing: bool,
+    /// Background music, and what it's playing.
+    music_on: bool,
+    music: Option<Arc<Mutex<music::NowPlaying>>>,
+    music_error: Option<String>,
 }
 
 impl GateAudio {
+    fn audio(&mut self) -> Option<&Audio> {
+        self.audio.get_or_insert_with(Audio::new).as_ref()
+    }
+
+    /// Start or stop the music to match the checkbox.
+    fn update_music(&mut self, src: &AssetSource) {
+        match (self.music_on, self.music.is_some()) {
+            (true, false) if self.music_error.is_none() => {
+                let player = (|| -> anyhow::Result<music::Player> {
+                    let path = music::Sbf::find(&src.path).ok_or_else(|| {
+                        anyhow::anyhow!("Ttfmusic.sbf not found (it's in the game folder, beside Tachyon.pff)")
+                    })?;
+                    let sbf = Arc::new(music::Sbf::open(&path)?);
+                    let script = Arc::new(music::Script::parse(src.read("TTFMUSIC.BIN")?)?);
+                    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
+                    Ok(music::Player::new(sbf, script, seed))
+                })();
+                match (player, self.audio().is_some()) {
+                    (Ok(p), true) => {
+                        self.music = Some(p.now.clone());
+                        if let Some(a) = self.audio() {
+                            a.set_music(Some(Box::new(p)));
+                        }
+                    }
+                    (Ok(_), false) => self.music_error = Some("no audio output".into()),
+                    (Err(e), _) => self.music_error = Some(format!("{e:#}")),
+                }
+            }
+            (false, true) => {
+                if let Some(Some(a)) = &self.audio {
+                    a.set_music(None);
+                }
+                self.music = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn now_playing(&self) -> Option<music::NowPlaying> {
+        self.music.as_ref().and_then(|m| m.lock().ok().map(|n| n.clone()))
+    }
+
     fn set_scene(&mut self, gates: Vec<model::GateSound>) {
         self.gates = gates;
         self.last = None;
@@ -784,10 +850,7 @@ impl GateAudio {
             self.last = None;
             return;
         }
-        if self.audio.is_none() {
-            self.audio = Some(Audio::new());
-        }
-        if !matches!(self.audio, Some(Some(_))) {
+        if self.audio().is_none() {
             return;
         }
         self.playing = true;

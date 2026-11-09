@@ -24,7 +24,7 @@ You can also start it with no argument and type a path into the box at the top l
 
 For scripted checks: `--select NAME` opens a model, `--camera YAW,PITCH,ZOOM` sets the view
 (degrees, degrees, 1 = fit), `--focus N` centres on object N of a sector,
-`--gates open|closed|cycle` sets the gate mode, `--mute` turns sound off, and
+`--gates open|closed|cycle` sets the gate mode, `--mute` turns off sound and music, and
 `--screenshot out.ppm` saves the frame and exits (screenshot runs are always silent).
 `TAV_TIME=1.5` pins the animation clock (seconds) for repeatable screenshots.
 
@@ -235,6 +235,23 @@ Blinking parts (26 PAKs):
 - sparks, welding and lightning (BFLASH, HBWELD*, SPRK2–4, LTNING*);
 - GASGNT02, SGPOD, SINZAP, REACTORA, TORPFRTS, WRPTUBE2, IBDBEACN.
 
+## Music
+
+The **Music** checkbox plays the game's in-flight music in the background (`src/music.rs`;
+`decomp/notes/music.md`).
+- **Where it comes from:** the segments are in `Ttfmusic.sbf`, in the game folder beside
+  `Tachyon.pff`. The viewer looks next to the asset source, in its parent folder, and in that
+  folder's subfolders. The segments are 451 short clips of IMA ADPCM, 22,050 Hz stereo.
+- **How they're sequenced:** the game's own music script, `TTFMUSIC.BIN`, picks each next
+  segment. It runs on a port of the exe's script VM, so intros, loop bars, variations and
+  endings follow the game's rules.
+- **Choosing a theme:** in the game, the sector, current job, hostiles and shields choose the
+  theme. Free flight with no job mostly gets a generic filler loop. The viewer has no job, so
+  it picks a random theme (one of 23 script states), plays it until the script ends it or
+  for 4 minutes, then picks another.
+- **Status:** hovering over the checkbox shows the theme and the segment now playing.
+- **What's left out:** cutscene stingers and the dispatcher's filler.
+
 ## Layout
 
 | file | what |
@@ -248,6 +265,7 @@ Blinking parts (26 PAKs):
 | `src/gate.rs` | `.anm` parse and playback, hyper gate poses, keyframe sound timing |
 | `src/pwf.rs` | `.PWF` sound bank and WAV decode |
 | `src/audio.rs` | software mixer → `cpal` output stream |
+| `src/music.rs` | `Ttfmusic.sbf` ADPCM streaming, `TTFMUSIC.BIN` script VM, theme player |
 | `src/weather.rs` | Lightning flash simulation and fog-sheet camera tracking |
 | `src/spx.rs` | SPX sector parse, `desnames.cfg` / `.des` model lookup, parent sector |
 | `examples/cbindump.rs` | prints any CBIN file (`cargo run --release --example cbindump -- FILE`) |

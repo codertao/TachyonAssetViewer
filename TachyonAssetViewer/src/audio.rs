@@ -18,9 +18,17 @@ struct Voice {
     key: Option<u64>,
 }
 
-#[derive(Default)]
 struct Mixer {
     voices: Vec<Voice>,
+    /// A streamed source (the music), added on top of the voices.
+    music: Option<Box<dyn Stream>>,
+    rate: u32,
+}
+
+/// A source that produces its own samples, such as the streamed music.
+pub trait Stream: Send {
+    /// Add interleaved stereo frames at `rate` Hz into `out`.
+    fn fill(&mut self, out: &mut [f32], rate: u32);
 }
 
 impl Mixer {
@@ -54,6 +62,9 @@ impl Mixer {
             }
         }
         self.voices.retain(|v| v.pos != f64::MAX);
+        if let Some(m) = &mut self.music {
+            m.fill(acc, self.rate);
+        }
     }
 }
 
@@ -115,7 +126,7 @@ impl Audio {
         let mut config: cpal::StreamConfig = supported.into();
         // A short buffer keeps sounds in step with the picture; fall back to the default.
         config.buffer_size = cpal::BufferSize::Fixed(config.sample_rate.0 / 50);
-        let mixer = Arc::new(Mutex::new(Mixer::default()));
+        let mixer = Arc::new(Mutex::new(Mixer { voices: vec![], music: None, rate: config.sample_rate.0 }));
         let make = |config: &cpal::StreamConfig| {
             let m = mixer.clone();
             use cpal::SampleFormat as F;
@@ -168,6 +179,13 @@ impl Audio {
                     key: Some(*key),
                 }),
             }
+        }
+    }
+
+    /// Start, replace or (with `None`) stop the streamed music.
+    pub fn set_music(&self, music: Option<Box<dyn Stream>>) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music = music;
         }
     }
 

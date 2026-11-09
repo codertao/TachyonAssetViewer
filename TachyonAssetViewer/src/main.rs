@@ -15,6 +15,7 @@ mod cbin;
 mod gate;
 mod math;
 mod model;
+mod music;
 mod ocf;
 mod pak;
 mod palette;
