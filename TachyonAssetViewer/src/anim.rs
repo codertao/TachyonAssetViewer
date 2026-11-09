@@ -144,6 +144,12 @@ impl Rig {
     }
 
     pub fn pose(&self, t: f32) -> Vec<PartPose> {
+        self.pose_with(t, None, 1.0)
+    }
+
+    /// `pose`, with part rotations (degrees) from an `.anm` replacing the state's
+    /// (`Anim_CopyPartRotations` writes the same fields) and an extra uniform instance scale.
+    pub fn pose_with(&self, t: f32, rot_deg: Option<&[[f32; 3]]>, extra_scale: f32) -> Vec<PartPose> {
         let n = self.parts.len();
         let tick = (t * UPDATE_HZ) as u32;
         let mut rot = vec![[0.0f32; 3]; n];
@@ -162,7 +168,12 @@ impl Rig {
                 hidden[a.part] = hidden[a.other as usize];
             }
         }
-        let s = self.scale(t, tick);
+        if let Some(r) = rot_deg {
+            for (dst, src) in rot.iter_mut().zip(r) {
+                *dst = src.map(|a| a / UNIT_DEG);
+            }
+        }
+        let s = self.scale(t, tick).map(|v| v * extra_scale);
         let smat = Mat3([[s[0], 0.0, 0.0], [0.0, s[1], 0.0], [0.0, 0.0, s[2]]]);
         let own: Vec<Mat3> = rot.iter().map(|r| Mat3::from_engine_euler_deg(r.map(|a| a * UNIT_DEG))).collect();
         let billboard = |i: usize| self.parts[i].flags & pak::PART_BILLBOARD != 0;

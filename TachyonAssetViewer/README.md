@@ -23,8 +23,9 @@ You can also start it with no argument and type a path into the box at the top l
   - An info line (parts, triangles, textures, size) and any load warnings.
 
 For scripted checks: `--select NAME` opens a model, `--camera YAW,PITCH,ZOOM` sets the view
-(degrees, degrees, 1 = fit), `--focus N` centres on object N of a sector, and
-`--screenshot out.ppm` saves the frame and exits.
+(degrees, degrees, 1 = fit), `--focus N` centres on object N of a sector,
+`--gates open|closed|cycle` sets the gate mode, and `--screenshot out.ppm` saves the frame and
+exits.
 `TAV_TIME=1.5` pins the animation clock (seconds) for repeatable screenshots.
 
 ## How models are built
@@ -50,7 +51,7 @@ For scripted checks: `--select NAME` opens a model, `--camera YAW,PITCH,ZOOM` se
   - Each placement names a SPED alias, which `desnames.cfg` maps to a `.des`. Player-ship
     aliases missing there fall back to `<alias>.des` or `<alias>.PAK`.
   - The `.des` `[main]` gives the model: `OCF_FILE` if present, else `EXTERIOR_PAK`. Hyper gates
-    add `CENTER_PAK`.
+    add `CENTER_PAK` and `FLARE_PAK` (see "Hyper gates" below).
   - The model is placed at the record's position (16.16 world units, the same scale as model
     vertices) with its Euler orientation (512 units per turn, same convention as OCF `ANGLES`).
   - Objects with flag `0x1000` aren't spawned at sector load (triggers spawn them later). They're
@@ -135,6 +136,40 @@ flies forward, as in `FUN_004b9250`.
   `Part_ComputeTransform 0x4b3f90` does. Their mesh is laid out in camera axes around the part's
   position, e.g. the green orb (`GOALGWAY.PAK`) in `GOAL.OCF`.
 
+### Hyper gates
+
+`gate.des` (`STARGATE.PAK`) and `megagate.des` (`MEGAGATE.PAK`) are the only `.des` files of type
+`HYPER_GATE`. Each draws three models at the same position and orientation, each with its own
+`.anm` (`src/gate.rs`; `decomp/notes/animation.md` "Gates"):
+- **Body** (`EXTERIOR_PAK` + `ANIMFILE`). Its three pylon bases are one mesh stacked three times
+  at rest; the anm's first keyframe turns two of them by ±120° about the gate axis. That is why
+  gates used to show a single pylon.
+- **Portal** (`CENTER_PAK` + `CENTER_ANIMFILE`): a billboard sphere whose anm sets its scale and
+  self-lit intensity (0 when closed). Its 16-frame texture runs at 25 fps (the game advances its
+  counter every other tick).
+- **Flare** (`FLARE_PAK` + `FLARE_ANIMFILE`): a billboard streak, scaled the same way. While lit
+  it flickers: every tick a random intensity of 128–255 and ±0.125 on the scale.
+
+The game poses a gate every frame from the **first keyframe** of an animation
+(`Anim_ApplyPose`): `GATE_OPEN` / `GATEWAY_OPEN` when the gate is closed, `GATE_CLOSE` /
+`GATEWAY_CLOSE` when it's open. Each animation starts from the pose it leaves.
+- **Open:** the pylon arms fold back against the bases and the centre is clear. This matches the
+  open collision mesh, which has nothing within 28 units of the axis.
+- **Closed:** the arms swing in to form a ring around the centre.
+
+Whether a gate is open depends on a mission variable named in its placement. With no variable,
+or a value below 1, it's open. 132 of the 175 gate placements use a variable the viewer can't
+evaluate, so a **Gates** picker chooses between:
+- **Open** (the default);
+- **Closed**;
+- **Cycle:** plays the open animation, holds 3 s, plays the close animation, holds 3 s, and
+  repeats. Keyframes move linearly over `TIME`, then hold for `PAUSE`, as `Anim_StepFrame` does.
+  Opening takes about 16 s, including the anm's built-in 6 s wait.
+
+Opening `STARGATE.PAK`, `GATE_WAY.PAK` and the other gate models on their own also uses their
+anm. Not drawn: the anm's particle streams (`particle_path`), its sounds, and the scripted camera
+fly-by.
+
 ### Models with state animation
 
 Spinning parts (30 PAKs):
@@ -169,6 +204,7 @@ Blinking parts (26 PAKs):
 | `src/cbin.rs` | CBIN decrypt and group/item/param walk |
 | `src/ocf.rs` | OCF parse and part placement |
 | `src/bdf.rs` | BDF backdrop parse (sky, images, lightning, fog) |
+| `src/gate.rs` | `.anm` parse and playback, hyper gate poses |
 | `src/weather.rs` | Lightning flash simulation and fog-sheet camera tracking |
 | `src/spx.rs` | SPX sector parse, `desnames.cfg` / `.des` model lookup, parent sector |
 | `examples/cbindump.rs` | prints any CBIN file (`cargo run --release --example cbindump -- FILE`) |
@@ -190,7 +226,9 @@ matches the extracted copy, and the Euler convention. The tests that need game d
   every game update.
 - `.des`-based models (ships with `connect` attachments) aren't assembled. Open their PAKs
   directly.
-- Sectors don't draw asteroid-field contents or gate animations (`.anm`). Backdrops skip the lens
-  flare. The BDF's `CLOUD_RGB`, `BACK_RGB` and `DOA` fog keys aren't drawn (the game's cloud
+- Sectors don't draw the flight-time space dust (`moveroid.pak` specks,
+  `decomp/notes/formats.md` "Space debris") or gate particle streams. Backdrops skip the lens
+  flare. The BDF's
+  `CLOUD_RGB`, `BACK_RGB` and `DOA` fog keys aren't drawn (the game's cloud
   routine is an empty stub). Backdrop images are lit by the sector light
   like models; the game's handling of them is unconfirmed.

@@ -1,6 +1,7 @@
 //! Turn parsed PAK / OCF data into GPU-ready batches (one per texture / flat colour / animation).
 
 use crate::anim::Rig;
+use crate::gate::{self, Anm, GateMode, Role};
 use crate::math::{self, Mat3};
 use crate::ocf::{self, Ocf};
 use crate::pak::{self, Pak};
@@ -9,6 +10,7 @@ use crate::palette::{self, Remap};
 use crate::{bdf, spx};
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -99,13 +101,36 @@ pub struct PartXform {
     pub model: [f32; 16],
     /// Extra scale for billboard offsets (scale curves).
     pub bbscale: [f32; 3],
+    /// Instance intensity (0..1) for self-lit materials (instance flag 0x80; gate centre and
+    /// flare).
+    pub intensity: Option<f32>,
 }
 
 impl PartXform {
     pub const IDENTITY: PartXform = PartXform {
         model: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         bbscale: [1.0; 3],
+        intensity: None,
     };
+}
+
+/// A gate model's `.anm` drive (see `gate`).
+#[derive(Clone)]
+struct Drive {
+    anm: Arc<Anm>,
+    role: Role,
+    /// Open / close playback lengths (ticks) of the whole gate, so its models stay in step.
+    cycle: (f32, f32),
+}
+
+impl Drive {
+    fn pose(&self, mode: GateMode, t: f32, salt: u32) -> gate::Pose {
+        let mut p = gate::gate_pose(&self.anm, self.role, mode, t, self.cycle);
+        if self.role == Role::Flare {
+            gate::flare_flicker(&mut p, (t * gate::TICK_HZ) as u32, salt);
+        }
+        p
+    }
 }
 
 struct DynInstance {
@@ -113,6 +138,7 @@ struct DynInstance {
     basis: Mat3,
     offset: [f32; 3],
     billboard: Vec<bool>,
+    drive: Option<Drive>,
 }
 
 /// Evaluates the state animation of every animated PAK instance in a scene.
@@ -122,10 +148,20 @@ pub struct Animator {
 
 impl Animator {
     /// One entry per animated part; `None` = hidden this frame.
-    pub fn frame(&self, t: f32) -> Vec<Option<PartXform>> {
+    pub fn frame(&self, t: f32, gates: GateMode) -> Vec<Option<PartXform>> {
         let mut out = vec![];
-        for inst in &self.instances {
-            for (i, pp) in inst.rig.pose(t).into_iter().enumerate() {
+        for (n, inst) in self.instances.iter().enumerate() {
+            let (poses, intensity) = match &inst.drive {
+                Some(d) => {
+                    let g = d.pose(gates, t, n as u32);
+                    // The body's instance has no scale flag (0x10); the centre and flare do.
+                    let scale = if d.role == Role::Body { 1.0 } else { g.scale };
+                    let rot = (d.role == Role::Body).then_some(&g.rot[..]);
+                    (inst.rig.pose_with(t, rot, scale), g.intensity.filter(|_| d.role != Role::Body).map(|i| i.clamp(0.0, 255.0) / 255.0))
+                }
+                None => (inst.rig.pose(t), None),
+            };
+            for (i, pp) in poses.into_iter().enumerate() {
                 if pp.hidden {
                     out.push(None);
                     continue;
@@ -148,7 +184,7 @@ impl Animator {
                 m[13] = tr[1];
                 m[14] = tr[2];
                 m[15] = 1.0;
-                out.push(Some(PartXform { model: m, bbscale }));
+                out.push(Some(PartXform { model: m, bbscale, intensity }));
             }
         }
         out
@@ -173,6 +209,8 @@ pub struct Scene {
     pub light: Option<SectorLight>,
     pub fog: Option<SectorFog>,
     pub animator: Option<Animator>,
+    /// Hyper gates driven by their `.anm` files.
+    pub gates: usize,
 }
 
 impl Scene {
@@ -293,6 +331,11 @@ struct Builder {
     dyn_parts: usize,
     spinning: usize,
     blinking: usize,
+    /// Gate drive for the PAK being added.
+    drive: Option<Drive>,
+    /// Override for material counter slot 0 (the per-entity counter).
+    slot0_fps: Option<f32>,
+    gates: usize,
 }
 
 impl Builder {
@@ -314,6 +357,9 @@ impl Builder {
             dyn_parts: 0,
             spinning: 0,
             blinking: 0,
+            drive: None,
+            slot0_fps: None,
+            gates: 0,
         }
     }
 
@@ -379,8 +425,17 @@ impl Builder {
         }
         let Some(l) = pak.lods.get(lod) else { return };
         let rig = Rig::new(pak, lod, self.state);
-        let poses = rig.pose(0.0);
-        let dynamic = rig.is_animated();
+        let drive = self.drive.clone();
+        // Bound a gate in its open pose (pylons fanned out, portal at full size).
+        let poses = match &drive {
+            Some(d) => {
+                let g = d.pose(GateMode::Open, 0.0, 0);
+                let body = d.role == Role::Body;
+                rig.pose_with(0.0, body.then_some(&g.rot[..]), if body { 1.0 } else { g.scale.max(0.0) })
+            }
+            None => rig.pose(0.0),
+        };
+        let dynamic = rig.is_animated() || drive.is_some();
         let first_dyn = self.dyn_parts;
         if dynamic {
             self.spinning += rig.spinning_parts();
@@ -391,6 +446,7 @@ impl Builder {
                 basis: *basis,
                 offset,
                 billboard: l.parts.iter().map(|p| p.flags & pak::PART_BILLBOARD != 0).collect(),
+                drive,
             });
         }
         for (pi, part) in l.parts.iter().enumerate() {
@@ -518,7 +574,11 @@ impl Builder {
         if images.is_empty() {
             return (flat(pak::BlendMode::Opaque), grey);
         }
-        let fps = if images.len() > 1 { pak.slot_fps(self.state, m.anim_slot) } else { 0.0 };
+        let fps = match (images.len() > 1, m.anim_slot, self.slot0_fps) {
+            (false, ..) => 0.0,
+            (true, 0, Some(f)) => f,
+            (true, slot, _) => pak.slot_fps(self.state, slot),
+        };
         let mode = pak::BlendMode::for_material(m);
         let unlit = m.flags & pak::MAT_FULLBRIGHT != 0 || mode == pak::BlendMode::Additive;
         let (emissive, spec_pow, spec_shift) = shading(m, layer);
@@ -566,6 +626,7 @@ impl Builder {
             light: None,
             fog: None,
             animator,
+            gates: self.gates,
         }
     }
 }
@@ -574,6 +635,16 @@ pub fn load_pak_scene(src: &AssetSource, name: &str, lod: usize, state: usize) -
     let pak = pak::parse(&src.read(name)?)?;
     let mut b = Builder::new();
     b.state = state;
+    // A gate model alone still gets its `.anm` pose (otherwise the pylons sit stacked).
+    let mut warnings = vec![];
+    if let Some(des) = spx::gate_des_for(src, name) {
+        let drives = ModelCache::default().gate_drives(src, &des.anims, &mut warnings);
+        if let Some(d) = des.models.iter().zip(drives).find(|(m, _)| m.eq_ignore_ascii_case(name)).and_then(|(_, d)| d) {
+            b.slot0_fps = (d.role == Role::Center).then_some(gate::TICK_HZ / 2.0);
+            b.drive = Some(d);
+            b.gates = 1;
+        }
+    }
     b.add_pak(name, &pak, lod, &Mat3::IDENTITY, 1.0, [0.0; 3]);
     let parts = pak.lods.get(lod).map(|l| l.parts.len()).unwrap_or(0);
     let info = vec![
@@ -587,7 +658,7 @@ pub fn load_pak_scene(src: &AssetSource, name: &str, lod: usize, state: usize) -
             pak.textures.len()
         ),
     ];
-    let mut scene = b.finish(info, vec![], pak.lods.len());
+    let mut scene = b.finish(info, warnings, pak.lods.len());
     scene.state_names = pak.states.iter().map(|s| s.name.clone()).collect();
     Ok(scene)
 }
@@ -626,9 +697,47 @@ struct ModelCache {
     /// OCF file -> its part placements (or None if it failed to load).
     ocfs: HashMap<String, Option<Vec<ocf::Placement>>>,
     protects: HashMap<String, Option<[bool; 256]>>,
+    anms: HashMap<String, Option<Arc<Anm>>>,
 }
 
 impl ModelCache {
+    fn anm(&mut self, src: &AssetSource, file: &str, warnings: &mut Vec<String>) -> Option<Arc<Anm>> {
+        let key = file.to_uppercase();
+        self.anms
+            .entry(key)
+            .or_insert_with(|| match src.read(file).and_then(|d| Anm::parse(&d)) {
+                Ok(a) => Some(Arc::new(a)),
+                Err(e) => {
+                    warnings.push(format!("{file}: {e}"));
+                    None
+                }
+            })
+            .clone()
+    }
+
+    /// Drives for a gate's models (one per model; `None` for non-gate models).
+    fn gate_drives(&mut self, src: &AssetSource, anims: &[Option<(String, Role)>], warnings: &mut Vec<String>) -> Vec<Option<Drive>> {
+        let loaded: Vec<Option<(Arc<Anm>, Role)>> =
+            anims.iter().map(|a| a.as_ref().and_then(|(f, r)| Some((self.anm(src, f, warnings)?, *r)))).collect();
+        let dur = |open: bool| {
+            loaded
+                .iter()
+                .flatten()
+                .map(|(a, r)| {
+                    let name = match (r, open) {
+                        (Role::Body, true) => "GATE_OPEN",
+                        (Role::Body, false) => "GATE_CLOSE",
+                        (_, true) => "GATEWAY_OPEN",
+                        (_, false) => "GATEWAY_CLOSE",
+                    };
+                    a.duration(name)
+                })
+                .fold(0.0f32, f32::max)
+        };
+        let cycle = (dur(true), dur(false));
+        loaded.into_iter().map(|l| l.map(|(anm, role)| Drive { anm, role, cycle })).collect()
+    }
+
     /// Protected palette indices for a PAK: from its same-named `.pal`, else none.
     fn protect(&mut self, src: &AssetSource, pak_file: &str) -> Option<[bool; 256]> {
         let stem = pak_file.rsplit_once('.').map(|(s, _)| s).unwrap_or(pak_file).to_uppercase();
@@ -786,8 +895,11 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
         for p in &s.placements {
             // Null records (kind 0) carry decl index -1.
             let Some(alias) = s.decls.get(p.decl).cloned() else { continue };
-            let models = match des.resolve(src, &alias) {
-                Ok(m) => m.models,
+            let (models, drives) = match des.resolve(src, &alias) {
+                Ok(m) => {
+                    let d = cache.gate_drives(src, &m.anims, &mut warnings);
+                    (m.models, d)
+                }
                 Err(e) => {
                     b.warn(format!("{file}: {e}"));
                     continue;
@@ -799,9 +911,16 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
             b.min = [f32::MAX; 3];
             b.max = [f32::MIN; 3];
             let mut drew = false;
-            for m in &models {
+            b.gates += drives.iter().any(|d| d.is_some()) as usize;
+            for (m, d) in models.iter().zip(drives) {
+                // The centre's think advances its texture counter every other tick
+                // (`FUN_00425d60`): 25 fps.
+                b.slot0_fps = d.as_ref().filter(|d| d.role == Role::Center).map(|_| gate::TICK_HZ / 2.0);
+                b.drive = d;
                 drew |= b.add_model(src, &mut cache, m, &rot, p.pos, &mut warnings);
             }
+            b.drive = None;
+            b.slot0_fps = None;
             let (omin, omax) = if b.min[0] <= b.max[0] { (b.min, b.max) } else { (to_gl(p.pos), to_gl(p.pos)) };
             for k in 0..3 {
                 b.min[k] = min0[k].min(omin[k]);
@@ -903,7 +1022,7 @@ mod tests {
             let mut b = Builder::new();
             b.add_pak(name, &pak, 0, &basis, 2.5, offset);
             let anim = Animator { instances: std::mem::take(&mut b.dyn_instances) };
-            let xf = anim.frame(0.0);
+            let xf = anim.frame(0.0, GateMode::Open);
             let poses = Rig::new(&pak, 0, 0).pose(0.0);
             let mut checked = 0;
             for batch in &b.batches {

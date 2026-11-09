@@ -1,5 +1,6 @@
 //! egui front end: asset list on the left, 3D view on the right.
 
+use crate::gate::GateMode;
 use crate::math::{self, Mat4};
 use crate::model::{self, Animator, Scene, SceneObject, SectorFog, SectorLight};
 use crate::render::{DrawParams, Flash, FogDraw, Renderer};
@@ -90,6 +91,8 @@ pub struct StartOptions {
     pub focus: Option<usize>,
     pub no_blend: bool,
     pub no_colorkey: bool,
+    /// Initial gate mode.
+    pub gates: Option<GateMode>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -115,6 +118,9 @@ pub struct ViewerApp {
     /// BDF fog, and whether to draw it.
     fog: Option<SectorFog>,
     show_fog: bool,
+    /// Hyper gates in the scene, and what they're doing.
+    gates: usize,
+    gate_mode: GateMode,
     lightning: Option<Lightning>,
     sheets: FogSheets,
     /// Camera eye and axes (forward, right, up) at the last frame, for the fog sheets.
@@ -176,6 +182,8 @@ impl ViewerApp {
             scene_light: None,
             fog: None,
             show_fog: true,
+            gates: 0,
+            gate_mode: opts.gates.unwrap_or(GateMode::Open),
             lightning: None,
             sheets: FogSheets::default(),
             prev_cam: None,
@@ -299,7 +307,9 @@ impl ViewerApp {
         self.lightning = scene.light.and_then(|l| l.lightning).map(Lightning::new);
         self.sheets = FogSheets::default();
         self.prev_cam = None;
-        self.animated |= self.lightning.is_some() || self.fog.is_some();
+        self.gates = scene.gates;
+        // Flares flicker and cycling gates move.
+        self.animated |= self.lightning.is_some() || self.fog.is_some() || self.gates > 0;
         self.parent = scene.parent.take();
         if reframe {
             self.camera.frame(scene.bbox_min, scene.bbox_max);
@@ -488,6 +498,24 @@ impl ViewerApp {
             if self.has_backdrop {
                 ui.checkbox(&mut self.backdrop, "Backdrop").on_hover_text("The sector's .BDF sky, planets and suns");
             }
+            if self.gates > 0 {
+                egui::ComboBox::from_id_salt("gates")
+                    .selected_text(match self.gate_mode {
+                        GateMode::Open => "Gates open",
+                        GateMode::Closed => "Gates closed",
+                        GateMode::Cycle => "Gates cycling",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.gate_mode, GateMode::Open, "Open");
+                        ui.selectable_value(&mut self.gate_mode, GateMode::Closed, "Closed");
+                        ui.selectable_value(&mut self.gate_mode, GateMode::Cycle, "Cycle (open / close animations)");
+                    })
+                    .response
+                    .on_hover_text(
+                        "Hyper gates' .anm poses. In the game a mission variable decides open or closed; \
+                         most gates start open",
+                    );
+            }
             if self.fog.is_some() {
                 ui.checkbox(&mut self.show_fog, "Fog")
                     .on_hover_text("The BDF's [fog]: depth fade to the fog colour, plus drifting fog sheets");
@@ -629,7 +657,7 @@ impl ViewerApp {
             proj_backdrop: self.camera.proj_backdrop(rect.width() / rect.height().max(1.0)),
             backdrop: self.backdrop && self.has_backdrop,
             time,
-            parts: Arc::new(self.animator.as_ref().map(|a| a.frame(time)).unwrap_or_default()),
+            parts: Arc::new(self.animator.as_ref().map(|a| a.frame(time, self.gate_mode)).unwrap_or_default()),
             light: math::sub(self.camera.eye(), self.camera.target),
             sector_light: if self.sector_lighting { self.scene_light } else { None },
             eye: self.camera.eye(),

@@ -505,6 +505,9 @@ impl Renderer {
                     let emissive = if pass == 3 {
                         // Instance flag 0x80: self-lit materials take the flash level.
                         bolt.map_or(1.0, |(_, k)| k)
+                    } else if let (Some(i), true) = (xf.intensity, b.emissive != 0) {
+                        // Likewise a gate centre / flare's instance intensity.
+                        i
                     } else if !p.lighting || pass == 1 {
                         -1.0
                     } else if b.emissive != 0 {

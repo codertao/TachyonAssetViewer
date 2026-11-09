@@ -3,6 +3,7 @@
 //! `Spx_ApplyPlacements 0x4351e0`, `Sped_ConstructEntity 0x434ac0`).
 
 use crate::cbin::{self, Value};
+use crate::gate::Role;
 use crate::source::AssetSource;
 use anyhow::{ensure, Result};
 use std::collections::HashMap;
@@ -93,13 +94,16 @@ pub fn parse(d: &[u8]) -> Result<Spx> {
 }
 
 /// The models a `.des` draws: `OCF_FILE` if present, else `EXTERIOR_PAK` (plus a hyper gate's
-/// `CENTER_PAK`).
+/// `CENTER_PAK` and `FLARE_PAK`, all at the gate's position and orientation: `FUN_004260c0`,
+/// `FUN_00425fe0`).
 #[derive(Debug, Clone, Default)]
 pub struct DesModel {
     #[allow(dead_code)]
     pub des_file: String,
     pub desc_type: String,
     pub models: Vec<String>,
+    /// Per model: its `.anm` and gate role (hyper gates only; see `gate`).
+    pub anims: Vec<Option<(String, Role)>>,
 }
 
 /// SPED alias → `.des` (`desnames.cfg` `DES: alias, file`), with each `.des` read on demand.
@@ -139,18 +143,27 @@ impl DesResolver {
             // `<alias>.des`, then a PAK of the same name.
             None if src.read(&format!("{key}.des")).is_ok() => format!("{key}.des"),
             None if src.read(&format!("{key}.PAK")).is_ok() => {
-                return Ok(DesModel { des_file: String::new(), desc_type: String::new(), models: vec![format!("{key}.PAK")] })
+                return Ok(DesModel { des_file: String::new(), desc_type: String::new(), models: vec![format!("{key}.PAK")], anims: vec![None] })
             }
             None => return Err(format!("{key}: not in desnames.cfg")),
         };
+        load_des(src, key, &des_file)
+    }
+}
+
+/// Read one `.des` (`key` labels errors).
+pub fn load_des(src: &AssetSource, key: &str, des_file: &str) -> Result<DesModel, String> {
+    {
         let groups = src
             .read(&des_file)
             .and_then(|d| cbin::parse(&d))
             .map_err(|e| format!("{key}: {des_file}: {e}"))?;
-        let mut m = DesModel { des_file: des_file.clone(), ..Default::default() };
+        let mut m = DesModel { des_file: des_file.to_string(), ..Default::default() };
         let mut ocf = None;
         let mut exterior = None;
         let mut center = None;
+        let mut flare = None;
+        let (mut anim, mut center_anim, mut flare_anim) = (None, None, None);
         if let Some(main) = groups.iter().find(|g| g.name.eq_ignore_ascii_case("main")) {
             for it in &main.items {
                 let first = match it.values.first() {
@@ -162,18 +175,43 @@ impl DesResolver {
                     "OCF_FILE" => ocf = Some(first),
                     "EXTERIOR_PAK" => exterior = Some(first),
                     "CENTER_PAK" => center = Some(first),
+                    "FLARE_PAK" => flare = Some(first),
+                    "ANIMFILE" => anim = Some(first),
+                    "CENTER_ANIMFILE" => center_anim = Some(first),
+                    "FLARE_ANIMFILE" => flare_anim = Some(first),
                     _ => {}
                 }
             }
         }
+        // Only hyper gates use the centre / flare models; the Enforcer's ANIMFILE is a pose
+        // driven by turning (not drawn here).
+        let gate = m.desc_type == "HYPER_GATE";
+        let role = |a: Option<String>, r: Role| a.filter(|_| gate).map(|a| (a, r));
         if let Some(o) = ocf {
             m.models.push(o);
+            m.anims.push(None);
         } else if let Some(e) = exterior {
             m.models.push(e);
-            m.models.extend(center);
+            m.anims.push(role(anim, Role::Body));
+            if let Some(c) = center {
+                m.models.push(c);
+                m.anims.push(role(center_anim, Role::Center));
+            }
+            if let Some(f) = flare.filter(|_| gate) {
+                m.models.push(f);
+                m.anims.push(role(flare_anim, Role::Flare));
+            }
         }
         Ok(m)
     }
+}
+
+/// The hyper-gate `.des` that uses `pak_file` as one of its models, if any.
+pub fn gate_des_for(src: &AssetSource, pak_file: &str) -> Option<DesModel> {
+    src.list(&[".DES"]).into_iter().find_map(|f| {
+        let m = load_des(src, &f, &f).ok()?;
+        (m.anims.iter().any(|a| a.is_some()) && m.models.iter().any(|x| x.eq_ignore_ascii_case(pak_file))).then_some(m)
+    })
 }
 
 /// The main sector a sub-sector stage belongs to: `bora05A.spx` → `BORA05.SPX`, confirmed by its

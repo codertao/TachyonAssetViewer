@@ -1,7 +1,7 @@
 //! Tachyon: The Fringe asset viewer.
 //!
 //! Usage: tachyon-asset-viewer [PFF_DIRECTORY | Tachyon.pff] [--select NAME]
-//!        [--camera YAW,PITCH,ZOOM] [--focus N] [--no-blend] [--no-colorkey] [--screenshot OUT.ppm]
+//!        [--camera YAW,PITCH,ZOOM] [--focus N] [--gates open|closed|cycle] [--no-blend] [--no-colorkey] [--screenshot OUT.ppm]
 //!
 //! `--select` opens a model on startup; `--camera` sets the view (degrees, degrees, zoom
 //! factor, 1 = fit); `--screenshot` saves the window after it has rendered
@@ -11,6 +11,7 @@ mod anim;
 mod app;
 mod bdf;
 mod cbin;
+mod gate;
 mod math;
 mod model;
 mod ocf;
@@ -30,6 +31,13 @@ fn main() -> eframe::Result {
             Some("--focus") => opts.focus = args.next().and_then(|s| s.to_string_lossy().parse().ok()),
             Some("--select") => opts.select = args.next().map(|s| s.to_string_lossy().into_owned()),
             Some("--no-blend") => opts.no_blend = true,
+            Some("--gates") => {
+                opts.gates = match args.next().and_then(|s| s.into_string().ok()).as_deref() {
+                    Some("closed") => Some(gate::GateMode::Closed),
+                    Some("cycle") => Some(gate::GateMode::Cycle),
+                    _ => Some(gate::GateMode::Open),
+                }
+            }
             Some("--no-colorkey") => opts.no_colorkey = true,
             Some("--camera") => {
                 let v: Vec<f32> = args
