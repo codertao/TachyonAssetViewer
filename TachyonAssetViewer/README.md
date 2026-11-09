@@ -24,8 +24,8 @@ You can also start it with no argument and type a path into the box at the top l
 
 For scripted checks: `--select NAME` opens a model, `--camera YAW,PITCH,ZOOM` sets the view
 (degrees, degrees, 1 = fit), `--focus N` centres on object N of a sector,
-`--gates open|closed|cycle` sets the gate mode, and `--screenshot out.ppm` saves the frame and
-exits.
+`--gates open|closed|cycle` sets the gate mode, `--mute` turns sound off, and
+`--screenshot out.ppm` saves the frame and exits (screenshot runs are always silent).
 `TAV_TIME=1.5` pins the animation clock (seconds) for repeatable screenshots.
 
 ## How models are built
@@ -187,7 +187,29 @@ The particles are evaluated from the clock rather than simulated, so `TAV_TIME` 
 repeatable.
 
 Opening `STARGATE.PAK`, `GATE_WAY.PAK` and the other gate models on their own also uses their
-anm. Not reproduced: the gate sounds and the scripted camera fly-by.
+anm. Not reproduced: the scripted camera fly-by.
+
+**Sounds** (`src/pwf.rs`, `src/audio.rs`; **Sound** checkbox, `--mute`). Samples come from
+`SPACE.PWF`, the flight sound bank: PCM WAVs looked up by name.
+- **Ring loop:** each gate plays its des `[sound] INNER_RING_SOUND` sample all the time:
+  - full volume within `INNER_FALLOFF`'s near distance (stargate 43.75 units);
+  - fading as near/distance beyond that (assumed DirectSound 3D-style rolloff);
+  - silent beyond the far distance (2,500 units);
+  - pitched by `INNER_PITCH` (the Mega Gate's loop plays at 0.75×).
+  The Mega Gate's `OUTER_RING_SOUND` is ignored, as the game ignores it (there is no `OUTER_*`
+  key in the exe's des key table).
+- **Keyframe sounds:** while gates cycle, each keyframe's `SOUND: label, delay` fires through
+  `sound_labels` with the game's timing: `delay` ticks after the keyframe is reached, lost if
+  the next keyframe arrives first. For the stargate:
+  - opening: `GATE_OPEN_1` at the start (from the flare's anm), then `GATE_OPEN_2` / `_3` as the
+    pylons lock;
+  - closing: `GATE_CLOSE`.
+  The Mega Gate's anms have no sounds.
+- **Approximations:** one-shots are mixed 2D, as in the game: volume 255 − distance/2 and pan
+  from the camera's right vector. The overall level and pan law are mine.
+- **Output:** a small software mixer feeding the default output device through `cpal`
+  (WASAPI on Windows, CoreAudio on macOS, ALSA on Linux). Building on Linux needs the ALSA
+  headers (`libasound2-dev` / `alsa-lib-devel`). With no output device the viewer is silent.
 
 ### Models with state animation
 
@@ -223,7 +245,9 @@ Blinking parts (26 PAKs):
 | `src/cbin.rs` | CBIN decrypt and group/item/param walk |
 | `src/ocf.rs` | OCF parse and part placement |
 | `src/bdf.rs` | BDF backdrop parse (sky, images, lightning, fog) |
-| `src/gate.rs` | `.anm` parse and playback, hyper gate poses |
+| `src/gate.rs` | `.anm` parse and playback, hyper gate poses, keyframe sound timing |
+| `src/pwf.rs` | `.PWF` sound bank and WAV decode |
+| `src/audio.rs` | software mixer → `cpal` output stream |
 | `src/weather.rs` | Lightning flash simulation and fog-sheet camera tracking |
 | `src/spx.rs` | SPX sector parse, `desnames.cfg` / `.des` model lookup, parent sector |
 | `examples/cbindump.rs` | prints any CBIN file (`cargo run --release --example cbindump -- FILE`) |

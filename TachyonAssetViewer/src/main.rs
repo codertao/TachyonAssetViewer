@@ -1,7 +1,7 @@
 //! Tachyon: The Fringe asset viewer.
 //!
 //! Usage: tachyon-asset-viewer [PFF_DIRECTORY | Tachyon.pff] [--select NAME]
-//!        [--camera YAW,PITCH,ZOOM] [--focus N] [--gates open|closed|cycle] [--no-blend] [--no-colorkey] [--screenshot OUT.ppm]
+//!        [--camera YAW,PITCH,ZOOM] [--focus N] [--gates open|closed|cycle] [--no-blend] [--no-colorkey] [--mute] [--screenshot OUT.ppm]
 //!
 //! `--select` opens a model on startup; `--camera` sets the view (degrees, degrees, zoom
 //! factor, 1 = fit); `--screenshot` saves the window after it has rendered
@@ -9,6 +9,7 @@
 
 mod anim;
 mod app;
+mod audio;
 mod bdf;
 mod cbin;
 mod gate;
@@ -18,6 +19,7 @@ mod ocf;
 mod pak;
 mod palette;
 mod pff;
+mod pwf;
 mod render;
 mod source;
 mod spx;
@@ -39,6 +41,7 @@ fn main() -> eframe::Result {
                 }
             }
             Some("--no-colorkey") => opts.no_colorkey = true,
+            Some("--mute") => opts.mute = true,
             Some("--camera") => {
                 let v: Vec<f32> = args
                     .next()

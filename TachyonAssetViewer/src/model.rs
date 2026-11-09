@@ -269,6 +269,39 @@ pub struct Scene {
     pub animator: Option<Animator>,
     /// Hyper gates driven by their `.anm` files.
     pub gates: usize,
+    /// Their sounds.
+    pub gate_sounds: Vec<GateSound>,
+}
+
+/// One gate's sounds: the anm keyframe sounds of its open / close playbacks (all three models,
+/// ticks from the start) and its ambient loop.
+#[derive(Clone, Debug)]
+pub struct GateSound {
+    /// GL-space position.
+    pub pos: [f32; 3],
+    pub cycle: (f32, f32),
+    pub open: Vec<(f32, String)>,
+    pub close: Vec<(f32, String)>,
+    pub ring: Option<spx::RingSound>,
+}
+
+impl GateSound {
+    fn new(pos: [f32; 3], drives: &[Option<Drive>], ring: Option<spx::RingSound>) -> Option<GateSound> {
+        let ds: Vec<&Drive> = drives.iter().flatten().collect();
+        let cycle = ds.first()?.cycle;
+        let events = |open: bool| {
+            let mut v: Vec<(f32, String)> = ds
+                .iter()
+                .flat_map(|d| {
+                    let (o, c) = d.role.names();
+                    d.anm.sound_events(if open { o } else { c })
+                })
+                .collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        };
+        Some(GateSound { pos, cycle, open: events(true), close: events(false), ring })
+    }
 }
 
 impl Scene {
@@ -704,6 +737,7 @@ impl Builder {
             fog: None,
             animator,
             gates: self.gates,
+            gate_sounds: vec![],
         }
     }
 }
@@ -714,8 +748,10 @@ pub fn load_pak_scene(src: &AssetSource, name: &str, lod: usize, state: usize) -
     b.state = state;
     // A gate model alone still gets its `.anm` pose (otherwise the pylons sit stacked).
     let mut warnings = vec![];
+    let mut gate_sound = None;
     if let Some(des) = spx::gate_des_for(src, name) {
         let drives = ModelCache::default().gate_drives(src, &des.anims, &mut warnings);
+        gate_sound = GateSound::new([0.0; 3], &drives, des.ring.clone());
         if let Some(d) = des.models.iter().zip(drives).find(|(m, _)| m.eq_ignore_ascii_case(name)).and_then(|(_, d)| d) {
             b.slot0_fps = (d.role == Role::Center).then_some(gate::TICK_HZ / 2.0);
             b.drive = Some(d);
@@ -739,6 +775,7 @@ pub fn load_pak_scene(src: &AssetSource, name: &str, lod: usize, state: usize) -
         ),
     ];
     let mut scene = b.finish(info, warnings, pak.lods.len());
+    scene.gate_sounds = gate_sound.into_iter().collect();
     scene.state_names = pak.states.iter().map(|s| s.name.clone()).collect();
     Ok(scene)
 }
@@ -977,6 +1014,7 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
     let mut cache = ModelCache::default();
     let mut b = Builder::new();
     let mut objects = vec![];
+    let mut gate_sounds = vec![];
     let (mut placed, mut deferred) = (0, 0);
     // Backdrop: a sub-sector stage usually leaves it blank and uses its main sector's.
     let backdrop = files.iter().rev().map(|(_, s)| s.backdrop.clone()).find(|b| !b.is_empty()).or_else(|| {
@@ -1006,6 +1044,7 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
             let (models, drives) = match des.resolve(src, &alias) {
                 Ok(m) => {
                     let d = cache.gate_drives(src, &m.anims, &mut warnings);
+                    gate_sounds.extend(GateSound::new(to_gl(p.pos), &d, m.ring.clone()));
                     (m.models, d)
                 }
                 Err(e) => {
@@ -1079,6 +1118,7 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
     }
     let mut scene = b.finish(info, warnings, 1);
     scene.objects = objects;
+    scene.gate_sounds = gate_sounds;
     scene.parent = parent;
     scene.light = bdf.as_ref().map(|bd| {
         let amb = (bd.ambient >> 1) as f32 / 256.0;

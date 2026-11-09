@@ -104,6 +104,23 @@ pub struct DesModel {
     pub models: Vec<String>,
     /// Per model: its `.anm` and gate role (hyper gates only; see `gate`).
     pub anims: Vec<Option<(String, Role)>>,
+    /// A hyper gate's ambient loop (`[sound] INNER_RING_SOUND`).
+    pub ring: Option<RingSound>,
+}
+
+/// `[sound] INNER_RING_SOUND: sample`, `INNER_FALLOFF: a, b`, `INNER_PITCH: p`: a looping 3D
+/// sound attached to the gate when it's created (`FUN_00426700` → `FUN_00466160` →
+/// `FUN_00466000`). The des keys are read through the table at `0x535ec8`, which has no
+/// `OUTER_*` keys, so the megagate's `OUTER_RING_SOUND` is ignored.
+#[derive(Debug, Clone)]
+pub struct RingSound {
+    pub sample: String,
+    /// World units: inaudible beyond `max` (`a << 13` as 16.16); full volume within `min`
+    /// (`b << 13`, or `max / 25` if `b` is 0).
+    pub max: f32,
+    pub min: f32,
+    /// 65536 = 1.
+    pub pitch: f32,
 }
 
 /// SPED alias → `.des` (`desnames.cfg` `DES: alias, file`), with each `.des` read on demand.
@@ -143,7 +160,7 @@ impl DesResolver {
             // `<alias>.des`, then a PAK of the same name.
             None if src.read(&format!("{key}.des")).is_ok() => format!("{key}.des"),
             None if src.read(&format!("{key}.PAK")).is_ok() => {
-                return Ok(DesModel { des_file: String::new(), desc_type: String::new(), models: vec![format!("{key}.PAK")], anims: vec![None] })
+                return Ok(DesModel { des_file: String::new(), desc_type: String::new(), models: vec![format!("{key}.PAK")], anims: vec![None], ring: None })
             }
             None => return Err(format!("{key}: not in desnames.cfg")),
         };
@@ -187,6 +204,21 @@ pub fn load_des(src: &AssetSource, key: &str, des_file: &str) -> Result<DesModel
         // driven by turning (not drawn here).
         let gate = m.desc_type == "HYPER_GATE";
         let role = |a: Option<String>, r: Role| a.filter(|_| gate).map(|a| (a, r));
+        if let Some(sg) = groups.iter().find(|g| g.name.eq_ignore_ascii_case("sound")).filter(|_| gate) {
+            let item = |k: &str| sg.items.iter().find(|i| i.key.eq_ignore_ascii_case(k));
+            let num = |k: &str, i: usize| item(k).and_then(|it| it.values.get(i)).and_then(|v| v.as_f32()).unwrap_or(0.0);
+            if let Some(Value::Str(sample)) = item("INNER_RING_SOUND").and_then(|i| i.values.first()) {
+                let max = num("INNER_FALLOFF", 0) / 8.0;
+                let b = num("INNER_FALLOFF", 1);
+                let pitch = num("INNER_PITCH", 0) / 65536.0;
+                m.ring = Some(RingSound {
+                    sample: sample.clone(),
+                    max,
+                    min: if b != 0.0 { b / 8.0 } else { max / 25.0 },
+                    pitch: if pitch > 0.0 { pitch } else { 1.0 },
+                });
+            }
+        }
         if let Some(o) = ocf {
             m.models.push(o);
             m.anims.push(None);

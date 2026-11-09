@@ -39,6 +39,9 @@ struct Key {
     scale: f32,
     /// 0..255; `None` when the keyframe has no INTENSITY (the engine stores -1).
     intensity: Option<f32>,
+    /// `SOUND: LABEL, delay`, resolved through `sound_labels` to (sample name, delay ticks).
+    /// Labels missing from the table play nothing (`FUN_00406170` returns 0).
+    sound: Option<(String, u32)>,
 }
 
 /// One `<anim>_particle_path_NN` group. During playback, after `wait` ticks, each of the next
@@ -109,6 +112,7 @@ impl Anm {
         let mut defines: Vec<(String, usize)> = vec![];
         let mut names = vec![];
         let mut particles: Vec<(String, String)> = vec![];
+        let mut labels: Vec<(String, String)> = vec![];
         for g in &groups {
             let gname = g.name.to_lowercase();
             for it in &g.items {
@@ -117,6 +121,11 @@ impl Anm {
                     ("defines", "PART_DEFINE") => {
                         if let (Some(Value::Str(n)), Some(i)) = (it.values.first(), it.values.get(1).and_then(|v| v.as_i32())) {
                             defines.push((n.to_uppercase(), i.max(0) as usize));
+                        }
+                    }
+                    ("sound_labels", "SOUND") => {
+                        if let (Some(Value::Str(l)), Some(Value::Str(f))) = (it.values.first(), it.values.get(1)) {
+                            labels.push((l.clone(), f.clone()));
                         }
                     }
                     ("particle_paks", "PARTICLE") => {
@@ -158,6 +167,12 @@ impl Anm {
                     parts,
                     scale: get("SCALE").and_then(|v| v.as_f32()).unwrap_or(0.0),
                     intensity: get("INTENSITY").and_then(|v| v.as_f32()),
+                    sound: g.items.iter().find(|i| i.key.eq_ignore_ascii_case("SOUND")).and_then(|i| {
+                        let Some(Value::Str(l)) = i.values.first() else { return None };
+                        // Exact (case-sensitive) match, as str_cmp.
+                        let sample = labels.iter().find(|(x, _)| x == l)?.1.clone();
+                        Some((sample, secs(i.values.get(1))))
+                    }),
                 });
             }
             let mut paths = vec![];
@@ -274,6 +289,44 @@ impl Anm {
                     scale: lerp(at(&p.src, 1), at(&p.dest, 1), g),
                     intensity: raw.clamp(0.0, 255.0) / 255.0,
                 });
+            }
+        }
+        out
+    }
+
+    /// The sounds a timed playback of `name` fires: (tick, sample name), replaying
+    /// `Anim_StepFrame`. A keyframe's sound fires its delay after the keyframe is reached (the
+    /// first one at the start), unless the next keyframe is reached first; the delay counts down
+    /// during pauses too.
+    pub fn sound_events(&self, name: &str) -> Vec<(f32, String)> {
+        let mut out = vec![];
+        let Some(a) = self.anim(name) else { return out };
+        let Some(k0) = a.keys.first() else { return out };
+        let (mut cur, mut next, mut frame_tick) = (0usize, 1usize, 0u32);
+        let (mut pause, mut delay, mut fired) = (k0.pause, k0.sound.as_ref().map_or(0, |s| s.1), false);
+        for tick in 1..100_000u32 {
+            delay = delay.saturating_sub(1);
+            if !fired && delay == 0 {
+                if let Some((sample, _)) = &a.keys[cur].sound {
+                    out.push((tick as f32, sample.clone()));
+                }
+                fired = true;
+            }
+            if pause > 0 {
+                pause -= 1;
+                continue;
+            }
+            if next >= a.keys.len() {
+                break;
+            }
+            frame_tick += 1;
+            if frame_tick >= a.keys[next].time {
+                cur = next;
+                next += 1;
+                frame_tick = 0;
+                pause = a.keys[cur].pause;
+                delay = a.keys[cur].sound.as_ref().map_or(0, |s| s.1);
+                fired = false;
             }
         }
         out
@@ -443,6 +496,15 @@ mod tests {
         assert!(burst.iter().any(|p| p.pos[0].abs() > 3.0));
         assert!(!a.has_particles() || a.particles("GATE_OPEN", 1e5, 7, tip).is_empty());
         assert!(Anm::parse(&src.read("Megagate.anm").unwrap()).unwrap().has_particles());
+
+        // Sounds: GATE_OPEN_2 9.1 s after the start; GATE_OPEN_3 1.9 s after keyframes 1 and 2
+        // are reached (ticks 475 and 588). SPHERE_CONTRACT has no label, so it's silent.
+        let ev = a.sound_events("GATE_OPEN");
+        assert_eq!(ev, vec![(455.0, "GATE_OPEN_2".into()), (570.0, "GATE_OPEN_3".into()), (683.0, "GATE_OPEN_3".into())]);
+        assert_eq!(a.sound_events("GATE_CLOSE"), vec![(1.0, "GATE_CLOSE".into())]);
+        let fl = Anm::parse(&src.read("gate_flr.anm").unwrap()).unwrap();
+        assert_eq!(fl.sound_events("GATEWAY_OPEN"), vec![(1.0, "GATE_OPEN_1".into())]);
+        assert!(fl.sound_events("GATEWAY_CLOSE").is_empty());
 
         let w = Anm::parse(&src.read("gate_way.anm").unwrap()).unwrap();
         assert_eq!((w.first_pose("GATEWAY_CLOSE").scale, w.first_pose("GATEWAY_CLOSE").intensity), (1.0, Some(255.0)));

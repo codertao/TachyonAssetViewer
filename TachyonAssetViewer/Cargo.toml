@@ -13,6 +13,7 @@ eframe = { version = "=0.31.1", default-features = false, features = ["glow", "d
 egui_glow = "=0.31.1"
 memmap2 = "0.9"
 anyhow = "1"
+cpal = "0.15"
 
 [profile.dev]
 opt-level = 1

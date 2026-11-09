@@ -1,6 +1,9 @@
 //! egui front end: asset list on the left, 3D view on the right.
 
-use crate::gate::GateMode;
+use crate::audio::Audio;
+use crate::gate::{self, GateMode};
+use crate::pwf::{Bank, Sound};
+use std::collections::HashMap;
 use crate::math::{self, Mat4};
 use crate::model::{self, Animator, Scene, SceneObject, SectorFog, SectorLight};
 use crate::render::{DrawParams, Flash, FogDraw, Renderer};
@@ -93,6 +96,7 @@ pub struct StartOptions {
     pub no_colorkey: bool,
     /// Initial gate mode.
     pub gates: Option<GateMode>,
+    pub mute: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -121,6 +125,7 @@ pub struct ViewerApp {
     /// Hyper gates in the scene, and what they're doing.
     gates: usize,
     gate_mode: GateMode,
+    sound: GateAudio,
     lightning: Option<Lightning>,
     sheets: FogSheets,
     /// Camera eye and axes (forward, right, up) at the last frame, for the fog sheets.
@@ -184,6 +189,7 @@ impl ViewerApp {
             show_fog: true,
             gates: 0,
             gate_mode: opts.gates.unwrap_or(GateMode::Open),
+            sound: GateAudio { on: !opts.mute && opts.screenshot.is_none(), ..Default::default() },
             lightning: None,
             sheets: FogSheets::default(),
             prev_cam: None,
@@ -308,6 +314,7 @@ impl ViewerApp {
         self.sheets = FogSheets::default();
         self.prev_cam = None;
         self.gates = scene.gates;
+        self.sound.set_scene(std::mem::take(&mut scene.gate_sounds));
         // Flares flicker and cycling gates move.
         self.animated |= self.lightning.is_some() || self.fog.is_some() || self.gates > 0;
         self.parent = scene.parent.take();
@@ -516,6 +523,12 @@ impl ViewerApp {
                          most gates start open",
                     );
             }
+            if !self.sound.gates.is_empty() {
+                ui.checkbox(&mut self.sound.on, "Sound").on_hover_text(
+                    "Gate sounds from SPACE.PWF: each gate's ambient loop, plus the open / close \
+                     animation sounds while cycling",
+                );
+            }
             if self.fog.is_some() {
                 ui.checkbox(&mut self.show_fog, "Fog")
                     .on_hover_text("The BDF's [fog]: depth fade to the fog colour, plus drifting fog sheets");
@@ -628,6 +641,9 @@ impl ViewerApp {
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or_else(|| ui.input(|i| i.time) as f32);
+        if let Some(src) = &self.source {
+            self.sound.update(src, time, self.gate_mode, self.camera.eye(), self.camera.target);
+        }
         let flash = self.lightning.as_mut().map(|l| {
             l.advance_to(time);
             Flash { diffuse_scale: l.diffuse_scale(), bolt: l.bolt() }
@@ -723,6 +739,101 @@ impl eframe::App for ViewerApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             ctx.request_repaint();
+        }
+    }
+}
+
+/// Gate sounds: a 2D mix of each gate's ambient loop and its keyframe sounds, from the camera.
+#[derive(Default)]
+struct GateAudio {
+    on: bool,
+    gates: Vec<model::GateSound>,
+    /// Opened on first use; `None` inside once that failed.
+    audio: Option<Option<Audio>>,
+    bank: Option<Option<Bank>>,
+    samples: HashMap<String, Option<Arc<Sound>>>,
+    last: Option<f32>,
+    playing: bool,
+}
+
+impl GateAudio {
+    fn set_scene(&mut self, gates: Vec<model::GateSound>) {
+        self.gates = gates;
+        self.last = None;
+        if let Some(Some(a)) = &self.audio {
+            a.stop_one_shots();
+            a.set_loops(&[]);
+        }
+    }
+
+    fn sample(&mut self, src: &AssetSource, name: &str) -> Option<Arc<Sound>> {
+        let bank = self.bank.get_or_insert_with(|| src.read("SPACE.PWF").ok().and_then(|d| Bank::parse(d).ok()));
+        let bank = bank.as_ref()?;
+        self.samples.entry(name.to_uppercase()).or_insert_with(|| bank.sound(name).map(Arc::new)).clone()
+    }
+
+    fn update(&mut self, src: &AssetSource, t: f32, mode: GateMode, eye: [f32; 3], target: [f32; 3]) {
+        if !self.on || self.gates.is_empty() {
+            if self.playing {
+                if let Some(Some(a)) = &self.audio {
+                    a.stop_one_shots();
+                    a.set_loops(&[]);
+                }
+                self.playing = false;
+            }
+            self.last = None;
+            return;
+        }
+        if self.audio.is_none() {
+            self.audio = Some(Audio::new());
+        }
+        if !matches!(self.audio, Some(Some(_))) {
+            return;
+        }
+        self.playing = true;
+        let fwd = math::normalize(math::sub(target, eye));
+        let right = math::normalize(math::cross(fwd, [0.0, 1.0, 0.0]));
+        // A paused or jumping clock (TAV_TIME, a long stall) fires nothing.
+        let prev = self.last.replace(t).filter(|&p| t > p && t - p < 0.5);
+        let mut loops = vec![];
+        let mut shots = vec![];
+        for (i, g) in self.gates.clone().iter().enumerate() {
+            let d = math::sub(g.pos, eye);
+            let dist = math::dot(d, d).sqrt();
+            let pan = if dist > 1e-3 { math::dot(d, right) / dist } else { 0.0 };
+            if let Some(r) = &g.ring {
+                if dist < r.max {
+                    if let Some(s) = self.sample(src, &r.sample) {
+                        let vol = (r.min / dist.max(1e-3)).min(1.0);
+                        loops.push((i as u64, s, vol, pan, r.pitch));
+                    }
+                }
+            }
+            if let (GateMode::Cycle, Some(p)) = (mode, prev) {
+                // Keyframe sounds: 2D, 255 − distance/2 out of 255.
+                let vol = ((255.0 - dist / 2.0) / 255.0).max(0.0);
+                let (o0, c0) = gate::cycle_ticks(p, g.cycle);
+                let (o1, c1) = gate::cycle_ticks(t, g.cycle);
+                let hit = |a: f32, b: f32, at: f32| if a <= b { at > a && at <= b } else { at > a || at <= b };
+                for (at, name) in &g.open {
+                    if hit(o0, o1, *at) {
+                        shots.push((name.clone(), vol, pan));
+                    }
+                }
+                for (at, name) in &g.close {
+                    if c1 >= 0.0 && c0 <= c1 && hit(c0, c1, *at) {
+                        shots.push((name.clone(), vol, pan));
+                    }
+                }
+            }
+        }
+        let shots: Vec<_> = shots.into_iter().filter_map(|(n, v, p)| Some((self.sample(src, &n)?, v, p))).collect();
+        let Some(Some(a)) = &self.audio else { return };
+        a.set_loops(&loops);
+        for (s, v, p) in shots {
+            if v > 0.0 {
+                a.play(s, v, p, 1.0);
+            }
         }
     }
 }
