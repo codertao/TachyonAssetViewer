@@ -166,9 +166,28 @@ evaluate, so a **Gates** picker chooses between:
   repeats. Keyframes move linearly over `TIME`, then hold for `PAUSE`, as `Anim_StepFrame` does.
   Opening takes about 16 s, including the anm's built-in 6 s wait.
 
+**Particle streams** (cycle mode only, since they exist only while a gate opens or closes).
+Both gate body anms have `particle_path`s (stargate: 20 for opening and 20 for closing; Mega Gate:
+14 and 8):
+- **Opening:** blue smoke (`smoke.pak`) and violet sparks (`vlt_part.pak`) stream from three
+  points on each pylon tip to the centre during the 6 s wait, then burst outwards from the centre.
+- **Closing:** the streams return, and there's a second burst at the end.
+
+Each path's rules, from `Anim_StepParticlePath` / `Anim_EmitParticle`:
+- **Emission:** after `WAIT`, each tick of `LIFETIME` emits a particle with probability
+  `(volume + 1) / 50`.
+- **Flight:** the particle flies in a straight line from the source part's attach point to the
+  destination's, taken in the pose at its emission tick. Each end is jittered by ±spread/2.
+- **Scale and brightness:** scale and intensity blend from source to destination over the
+  particle's own life.
+- **Path values:** every path value (volume, life, scale, intensity, spread) moves from its
+  `_START` to its `_END` across the path's lifetime.
+
+The particles are evaluated from the clock rather than simulated, so `TAV_TIME` screenshots stay
+repeatable.
+
 Opening `STARGATE.PAK`, `GATE_WAY.PAK` and the other gate models on their own also uses their
-anm. Not drawn: the anm's particle streams (`particle_path`), its sounds, and the scripted camera
-fly-by.
+anm. Not reproduced: the gate sounds and the scripted camera fly-by.
 
 ### Models with state animation
 
@@ -227,8 +246,7 @@ matches the extracted copy, and the Euler convention. The tests that need game d
 - `.des`-based models (ships with `connect` attachments) aren't assembled. Open their PAKs
   directly.
 - Sectors don't draw the flight-time space dust (`moveroid.pak` specks,
-  `decomp/notes/formats.md` "Space debris") or gate particle streams. Backdrops skip the lens
-  flare. The BDF's
+  `decomp/notes/formats.md` "Space debris"). Backdrops skip the lens flare. The BDF's
   `CLOUD_RGB`, `BACK_RGB` and `DOA` fog keys aren't drawn (the game's cloud
   routine is an empty stub). Backdrop images are lit by the sector light
   like models; the game's handling of them is unconfirmed.

@@ -54,6 +54,9 @@ pub struct Batch {
     /// Animated part this batch belongs to (index into `Animator::frame`'s output). Its
     /// vertices are then in the part's own space; `None` = baked world space.
     pub part: Option<usize>,
+    /// Particle template (index into `Animator::sprites`' output): drawn once per live particle,
+    /// as a billboard at that particle's position and scale.
+    pub sprite: Option<usize>,
     pub verts: Vec<Vertex>,
 }
 
@@ -133,6 +136,32 @@ impl Drive {
     }
 }
 
+/// A gate body whose `.anm` streams particles during its open / close playback.
+struct Emitter {
+    /// Index into `Animator::instances`.
+    inst: usize,
+    anm: Arc<Anm>,
+    /// Sprite template per `Anm::particle_paks` entry.
+    sprites: Vec<Option<usize>>,
+}
+
+/// GL model matrix from an engine-axis linear part and a GL translation:
+/// GL = F·engine·F with F = diag(1, 1, -1).
+fn gl_matrix(lin: &Mat3, tr: [f32; 3]) -> [f32; 16] {
+    let f = [1.0, 1.0, -1.0];
+    let mut m = [0.0f32; 16];
+    for r in 0..3 {
+        for c in 0..3 {
+            m[c * 4 + r] = lin.0[r][c] * f[r] * f[c];
+        }
+    }
+    m[12] = tr[0];
+    m[13] = tr[1];
+    m[14] = tr[2];
+    m[15] = 1.0;
+    m
+}
+
 struct DynInstance {
     rig: Rig,
     basis: Mat3,
@@ -144,6 +173,8 @@ struct DynInstance {
 /// Evaluates the state animation of every animated PAK instance in a scene.
 pub struct Animator {
     instances: Vec<DynInstance>,
+    emitters: Vec<Emitter>,
+    n_sprites: usize,
 }
 
 impl Animator {
@@ -172,19 +203,46 @@ impl Animator {
                 } else {
                     (inst.basis.mul(&pp.m), [1.0; 3])
                 };
-                // GL = F·engine·F with F = diag(1, 1, -1).
-                let f = [1.0, 1.0, -1.0];
-                let mut m = [0.0f32; 16];
-                for r in 0..3 {
-                    for c in 0..3 {
-                        m[c * 4 + r] = lin.0[r][c] * f[r] * f[c];
-                    }
+                out.push(Some(PartXform { model: gl_matrix(&lin, tr), bbscale, intensity }));
+            }
+        }
+        out
+    }
+}
+
+impl Animator {
+    /// Live gate particles, one list per sprite template. They only exist while a gate is
+    /// opening or closing, so only in cycle mode.
+    pub fn sprites(&self, t: f32, gates: GateMode) -> Vec<Vec<PartXform>> {
+        let mut out = vec![vec![]; self.n_sprites];
+        if gates != GateMode::Cycle {
+            return out;
+        }
+        for (k, e) in self.emitters.iter().enumerate() {
+            let inst = &self.instances[e.inst];
+            let Some(d) = &inst.drive else { continue };
+            let (t_open, t_close) = gate::cycle_ticks(t, d.cycle);
+            let (open, close) = d.role.names();
+            for (name, ticks) in [(open, t_open), (close, t_close)] {
+                if ticks < 0.0 {
+                    continue;
                 }
-                m[12] = tr[0];
-                m[13] = tr[1];
-                m[14] = tr[2];
-                m[15] = 1.0;
-                out.push(Some(PartXform { model: m, bbscale, intensity }));
+                // The body's pose at each emission tick, computed once per tick.
+                let mut poses: HashMap<u32, Vec<crate::anim::PartPose>> = HashMap::new();
+                let sparks = e.anm.particles(name, ticks, k as u32 * 2 + (name == close) as u32, |tick, part, idx| {
+                    let pp = poses
+                        .entry(tick)
+                        .or_insert_with(|| inst.rig.pose_with(t, Some(&e.anm.play(name, tick as f32).rot), 1.0));
+                    math::add(inst.basis.mul_vec(inst.rig.attach_point(pp, part, idx)), inst.offset)
+                });
+                for s in sparks {
+                    let Some(Some(id)) = e.sprites.get(s.model) else { continue };
+                    out[*id].push(PartXform {
+                        model: gl_matrix(&Mat3::IDENTITY, to_gl(s.pos)),
+                        bbscale: [s.scale; 3],
+                        intensity: Some(s.intensity),
+                    });
+                }
             }
         }
         out
@@ -302,6 +360,7 @@ struct BatchKey {
     layer: u8,
     unlit: bool,
     part: Option<usize>,
+    sprite: Option<usize>,
     backdrop: u8,
     emissive: u8,
     spec_pow: u8,
@@ -333,6 +392,10 @@ struct Builder {
     blinking: usize,
     /// Gate drive for the PAK being added.
     drive: Option<Drive>,
+    /// Particle template id for the PAK being added.
+    sprite: Option<usize>,
+    sprite_ids: HashMap<String, usize>,
+    emitters: Vec<Emitter>,
     /// Override for material counter slot 0 (the per-entity counter).
     slot0_fps: Option<f32>,
     gates: usize,
@@ -358,6 +421,9 @@ impl Builder {
             spinning: 0,
             blinking: 0,
             drive: None,
+            sprite: None,
+            sprite_ids: HashMap::new(),
+            emitters: vec![],
             slot0_fps: None,
             gates: 0,
         }
@@ -379,6 +445,7 @@ impl Builder {
                     spec_pow: key.spec_pow,
                     spec_shift: key.spec_shift,
                     part: key.part,
+                    sprite: key.sprite,
                     verts: vec![],
                 });
                 self.batch_ids.insert(key, n);
@@ -455,7 +522,8 @@ impl Builder {
                 continue;
             }
             let Some(mesh) = pak.meshes.get(&part.mesh_ofs) else { continue };
-            let billboard = part.flags & pak::PART_BILLBOARD != 0;
+            // Particle templates are whole-instance billboards (instance flag 4).
+            let billboard = part.flags & pak::PART_BILLBOARD != 0 || self.sprite.is_some();
             let center = to_gl(math::add(basis.mul_vec(pose.pos), offset));
             // World-space points at t = 0. Billboards: scale only, in camera axes around the
             // part's position.
@@ -468,7 +536,8 @@ impl Builder {
                     .map(|&p| to_gl(math::add(basis.mul_vec(math::add(pose.pos, pose.m.mul_vec(p))), offset)))
                     .collect()
             };
-            for &p in &world {
+            let bound = self.sprite.is_none();
+            for &p in world.iter().filter(|_| bound) {
                 // For billboards, bound the pivot plus the offset's length in every direction.
                 if billboard {
                     let r = math::dot(p, p).sqrt();
@@ -511,6 +580,7 @@ impl Builder {
                     let (mut key, color) = self.material_key(pak_file, pak, &mesh.materials, mi, layer, &tex_ids);
                     key.part = part_id;
                     key.backdrop = self.backdrop;
+                    key.sprite = self.sprite;
                     let batch = self.batch(key);
                     for (j, &vi) in f.v.iter().enumerate() {
                         batch.verts.push(Vertex {
@@ -543,6 +613,7 @@ impl Builder {
             layer,
             unlit: false,
             part: None,
+            sprite: None,
             backdrop: 0,
             emissive: 0,
             spec_pow: 0,
@@ -589,6 +660,7 @@ impl Builder {
             layer,
             unlit,
             part: None,
+            sprite: None,
             backdrop: 0,
             emissive,
             spec_pow,
@@ -611,7 +683,12 @@ impl Builder {
                 self.billboards, self.spinning, self.blinking
             ));
         }
-        let animator = (!self.dyn_instances.is_empty()).then_some(Animator { instances: self.dyn_instances });
+        let n_sprites = self.sprite_ids.len();
+        let animator = (!self.dyn_instances.is_empty()).then_some(Animator {
+            instances: self.dyn_instances,
+            emitters: self.emitters,
+            n_sprites,
+        });
         Scene {
             images: self.images,
             batches: self.batches,
@@ -646,6 +723,9 @@ pub fn load_pak_scene(src: &AssetSource, name: &str, lod: usize, state: usize) -
         }
     }
     b.add_pak(name, &pak, lod, &Mat3::IDENTITY, 1.0, [0.0; 3]);
+    if let Some(d) = b.drive.take() {
+        b.add_emitter(src, &mut ModelCache::default(), &d, &mut warnings);
+    }
     let parts = pak.lods.get(lod).map(|l| l.parts.len()).unwrap_or(0);
     let info = vec![
         format!("'{}'  flags {:#x}", pak.name, pak.flags),
@@ -791,6 +871,34 @@ impl ModelCache {
 }
 
 impl Builder {
+    /// A particle PAK as a sprite template (unremapped, like the game's FX pool).
+    fn ensure_sprite(&mut self, src: &AssetSource, cache: &mut ModelCache, file: &str, warnings: &mut Vec<String>) -> Option<usize> {
+        let key = file.to_uppercase();
+        if let Some(&id) = self.sprite_ids.get(&key) {
+            return Some(id);
+        }
+        let pak = cache.pak(src, file, warnings)?;
+        let id = self.sprite_ids.len();
+        let saved = (self.remap.take(), self.protect.take(), self.drive.take(), self.slot0_fps.take(), self.backdrop);
+        self.backdrop = 0;
+        self.sprite = Some(id);
+        self.add_pak(file, pak, 0, &Mat3::IDENTITY, 1.0, [0.0; 3]);
+        self.sprite = None;
+        (self.remap, self.protect, self.drive, self.slot0_fps, self.backdrop) = saved;
+        self.sprite_ids.insert(key, id);
+        Some(id)
+    }
+
+    /// After adding a gate body: register its particle streams.
+    fn add_emitter(&mut self, src: &AssetSource, cache: &mut ModelCache, d: &Drive, warnings: &mut Vec<String>) {
+        if d.role != Role::Body || !d.anm.has_particles() || self.dyn_instances.is_empty() {
+            return;
+        }
+        let inst = self.dyn_instances.len() - 1;
+        let sprites = d.anm.particle_paks.clone().iter().map(|f| self.ensure_sprite(src, cache, f, warnings)).collect();
+        self.emitters.push(Emitter { inst, anm: d.anm.clone(), sprites });
+    }
+
     /// Add a PAK or OCF at a world rotation / position. Returns false if nothing was drawn.
     fn add_model(&mut self, src: &AssetSource, cache: &mut ModelCache, file: &str, rot: &Mat3, pos: [f32; 3], warnings: &mut Vec<String>) -> bool {
         if file.to_uppercase().ends_with(".OCF") {
@@ -916,8 +1024,12 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
                 // The centre's think advances its texture counter every other tick
                 // (`FUN_00425d60`): 25 fps.
                 b.slot0_fps = d.as_ref().filter(|d| d.role == Role::Center).map(|_| gate::TICK_HZ / 2.0);
-                b.drive = d;
+                b.drive = d.clone();
                 drew |= b.add_model(src, &mut cache, m, &rot, p.pos, &mut warnings);
+                if let Some(d) = &d {
+                    b.drive = None;
+                    b.add_emitter(src, &mut cache, d, &mut warnings);
+                }
             }
             b.drive = None;
             b.slot0_fps = None;
@@ -1021,7 +1133,7 @@ mod tests {
             let pak = pak::parse(&src.read(name).unwrap()).unwrap();
             let mut b = Builder::new();
             b.add_pak(name, &pak, 0, &basis, 2.5, offset);
-            let anim = Animator { instances: std::mem::take(&mut b.dyn_instances) };
+            let anim = Animator { instances: std::mem::take(&mut b.dyn_instances), emitters: vec![], n_sprites: 0 };
             let xf = anim.frame(0.0, GateMode::Open);
             let poses = Rig::new(&pak, 0, 0).pose(0.0);
             let mut checked = 0;

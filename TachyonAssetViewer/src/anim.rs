@@ -28,6 +28,7 @@ struct RigPart {
     n_children: usize,
     flags: u32,
     pivots: Vec<[f32; 3]>,
+    attach: Vec<[f32; 3]>,
 }
 
 /// The part tree of one PAK LOD plus the animation of one state.
@@ -84,6 +85,7 @@ impl Rig {
                         n_children: p.n_children,
                         flags: p.flags,
                         pivots: pak.meshes.get(&p.mesh_ofs).map(|m| m.pivots.clone()).unwrap_or_default(),
+                        attach: pak.meshes.get(&p.mesh_ofs).map(|m| m.attach.clone()).unwrap_or_default(),
                     })
                     .collect()
             })
@@ -141,6 +143,18 @@ impl Rig {
             s[0] = v;
         }
         s
+    }
+
+    /// A part's attach point in model space under `poses` (`FUN_00407560`): the transformed
+    /// point, or the model origin if the part has no such point.
+    pub fn attach_point(&self, poses: &[PartPose], part: usize, idx: usize) -> [f32; 3] {
+        match (self.parts.get(part), poses.get(part)) {
+            (Some(rp), Some(pp)) => match rp.attach.get(idx) {
+                Some(&a) => math::add(pp.pos, pp.m.mul_vec(a)),
+                None => [0.0; 3],
+            },
+            _ => [0.0; 3],
+        }
     }
 
     pub fn pose(&self, t: f32) -> Vec<PartPose> {

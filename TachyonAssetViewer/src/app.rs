@@ -658,6 +658,7 @@ impl ViewerApp {
             backdrop: self.backdrop && self.has_backdrop,
             time,
             parts: Arc::new(self.animator.as_ref().map(|a| a.frame(time, self.gate_mode)).unwrap_or_default()),
+            sprites: Arc::new(self.animator.as_ref().map(|a| a.sprites(time, self.gate_mode)).unwrap_or_default()),
             light: math::sub(self.camera.eye(), self.camera.target),
             sector_light: if self.sector_lighting { self.scene_light } else { None },
             eye: self.camera.eye(),

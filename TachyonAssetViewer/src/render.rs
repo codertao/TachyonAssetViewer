@@ -166,6 +166,7 @@ struct GpuBatch {
     layer: u8,
     unlit: bool,
     part: Option<usize>,
+    sprite: Option<usize>,
     backdrop: u8,
     emissive: u8,
     spec_pow: u8,
@@ -196,6 +197,8 @@ pub struct DrawParams {
     pub time: f32,
     /// This frame's transforms for animated parts (`None` = hidden).
     pub parts: Arc<Vec<Option<PartXform>>>,
+    /// Live particles per sprite template (`Batch::sprite`).
+    pub sprites: Arc<Vec<Vec<PartXform>>>,
     pub light: [f32; 3],
     /// Camera position (GL world), for specular highlights.
     pub eye: [f32; 3],
@@ -314,6 +317,7 @@ impl Renderer {
                 layer: b.layer,
                 unlit: b.unlit,
                 part: b.part,
+                sprite: b.sprite,
                 backdrop: b.backdrop,
                 emissive: b.emissive,
                 spec_pow: b.spec_pow,
@@ -451,16 +455,22 @@ impl Renderer {
                     gl.uniform_matrix_4_f32_slice(u_proj.as_ref(), false, &p.proj_backdrop.0);
                 }
                 for b in scene.batches.iter().filter(|b| b.backdrop == pass) {
-                    let xf = match b.part {
-                        None => PartXform::IDENTITY,
-                        Some(i) => match p.parts.get(i) {
-                            Some(Some(x)) => *x,
+                    let one;
+                    let xfs: &[PartXform] = match (b.sprite, b.part) {
+                        (Some(sid), _) => match p.sprites.get(sid) {
+                            Some(v) if !v.is_empty() => v,
+                            _ => continue,
+                        },
+                        (None, None) => std::slice::from_ref(&PartXform::IDENTITY),
+                        (None, Some(i)) => match p.parts.get(i) {
+                            Some(Some(x)) => {
+                                one = *x;
+                                std::slice::from_ref(&one)
+                            }
                             Some(None) => continue, // blinked off
-                            None => PartXform::IDENTITY,
+                            None => std::slice::from_ref(&PartXform::IDENTITY),
                         },
                     };
-                    gl.uniform_matrix_4_f32_slice(u_model.as_ref(), false, &xf.model);
-                    gl.uniform_3_f32(u_bbscale.as_ref(), xf.bbscale[0], xf.bbscale[1], xf.bbscale[2]);
                     // Mat_GetAnimFrame: frame = counter % frames, counter = fps × seconds.
                     // The lightning overlay's counter is the flash's random bolt number.
                     let frame = if pass == 3 {
@@ -502,11 +512,11 @@ impl Renderer {
                     // Material alpha = self-illumination at 2·alpha (0xff: full). With the sector
                     // light this follows the game exactly (alpha 0 is lit, even additive glows);
                     // the headlight keeps additive / full-bright materials at full brightness.
-                    let emissive = if pass == 3 {
+                    let emissive = |xf: &PartXform| if pass == 3 {
                         // Instance flag 0x80: self-lit materials take the flash level.
                         bolt.map_or(1.0, |(_, k)| k)
                     } else if let (Some(i), true) = (xf.intensity, b.emissive != 0) {
-                        // Likewise a gate centre / flare's instance intensity.
+                        // Likewise a gate centre / flare / particle's instance intensity.
                         i
                     } else if !p.lighting || pass == 1 {
                         -1.0
@@ -517,13 +527,17 @@ impl Renderer {
                     } else {
                         -1.0
                     };
-                    gl.uniform_1_f32(u_emissive.as_ref(), emissive);
                     gl.uniform_1_i32(u_spec_pow.as_ref(), b.spec_pow as i32);
                     gl.uniform_1_f32(u_spec_scale.as_ref(), (1u32 << b.spec_shift.min(16)) as f32 / 255.0);
                     gl.uniform_1_i32(u_textured.as_ref(), tex.is_some() as i32);
                     gl.bind_texture(glow::TEXTURE_2D, tex);
                     gl.bind_vertex_array(Some(b.vao));
-                    gl.draw_arrays(glow::TRIANGLES, 0, b.count);
+                    for xf in xfs {
+                        gl.uniform_matrix_4_f32_slice(u_model.as_ref(), false, &xf.model);
+                        gl.uniform_3_f32(u_bbscale.as_ref(), xf.bbscale[0], xf.bbscale[1], xf.bbscale[2]);
+                        gl.uniform_1_f32(u_emissive.as_ref(), emissive(xf));
+                        gl.draw_arrays(glow::TRIANGLES, 0, b.count);
+                    }
                 }
             }
             if let (Some(f), true) = (&p.fog, p.textures) {
