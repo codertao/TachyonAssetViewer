@@ -936,8 +936,10 @@ impl Builder {
         self.emitters.push(Emitter { inst, anm: d.anm.clone(), sprites });
     }
 
-    /// Add a PAK or OCF at a world rotation / position. Returns false if nothing was drawn.
-    fn add_model(&mut self, src: &AssetSource, cache: &mut ModelCache, file: &str, rot: &Mat3, pos: [f32; 3], warnings: &mut Vec<String>) -> bool {
+    /// Add a PAK or OCF at a world rotation / uniform scale / position. Returns false if nothing
+    /// was drawn.
+    fn add_model(&mut self, src: &AssetSource, cache: &mut ModelCache, file: &str, rot: &Mat3, scale: f32, pos: [f32; 3], warnings: &mut Vec<String>) -> bool {
+        let rot = &rot.scaled(scale);
         if file.to_uppercase().ends_with(".OCF") {
             let Some(placements) = cache.ocf(src, file, warnings) else { return false };
             for pl in &placements {
@@ -947,7 +949,7 @@ impl Builder {
                 let Some(pak) = cache.pak(src, &pl.pak_file, warnings) else { continue };
                 let basis = rot.mul(&pl.basis);
                 let offset = math::add(pos, rot.mul_vec(pl.offset));
-                self.add_pak(&pl.pak_file, pak, 0, &basis, pl.scale, offset);
+                self.add_pak(&pl.pak_file, pak, 0, &basis, pl.scale * scale, offset);
             }
             !placements.is_empty()
         } else {
@@ -955,7 +957,7 @@ impl Builder {
                 self.protect = cache.protect(src, file);
             }
             let Some(pak) = cache.pak(src, file, warnings) else { return false };
-            self.add_pak(file, pak, 0, rot, 1.0, pos);
+            self.add_pak(file, pak, 0, rot, scale, pos);
             true
         }
     }
@@ -1011,6 +1013,10 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
     }
     files.push((name.to_string(), main.clone()));
     let mut des = spx::DesResolver::new(src)?;
+    let groups = spx::FlightGroups::load(src).unwrap_or_else(|e| {
+        warnings.push(format!("group names: {e}"));
+        spx::FlightGroups::default()
+    });
     let mut cache = ModelCache::default();
     let mut b = Builder::new();
     let mut objects = vec![];
@@ -1064,7 +1070,7 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
                 // (`FUN_00425d60`): 25 fps.
                 b.slot0_fps = d.as_ref().filter(|d| d.role == Role::Center).map(|_| gate::TICK_HZ / 2.0);
                 b.drive = d.clone();
-                drew |= b.add_model(src, &mut cache, m, &rot, p.pos, &mut warnings);
+                drew |= b.add_model(src, &mut cache, m, &rot, p.scale, p.pos, &mut warnings);
                 if let Some(d) = &d {
                     b.drive = None;
                     b.add_emitter(src, &mut cache, d, &mut warnings);
@@ -1088,7 +1094,7 @@ pub fn load_spx_scene(src: &AssetSource, name: &str, include_parent: bool) -> Re
                 label: format!(
                     "{alias}  #{}{}{}{src_tag}",
                     p.id,
-                    if p.group >= 0 { format!("  group {}", p.group) } else { String::new() },
+                    if p.group >= 0 { format!("  group {}", groups.label(s, p.group)) } else { String::new() },
                     if p.deferred() { "  (spawned by trigger)" } else { "" }
                 ),
                 center: math::scale(math::add(omin, omax), 0.5),

@@ -54,8 +54,13 @@ For scripted checks: `--select NAME` opens a model, `--camera YAW,PITCH,ZOOM` se
     add `CENTER_PAK` and `FLARE_PAK` (see "Hyper gates" below).
   - The model is placed at the record's position (16.16 world units, the same scale as model
     vertices) with its Euler orientation (512 units per turn, same convention as OCF `ANGLES`).
-  - Objects with flag `0x1000` aren't spawned at sector load (triggers spawn them later). They're
-    drawn anyway and marked in the object list.
+  - Asteroids and debris (kind 2) are drawn at their 16.16 scale from record `+0x38` (1–10 in the
+    shipped data; `Asteroid_SpawnAtLoad 0x407f30`).
+  - Kind-3 objects (ships, stations, mines, …) with flag `0x8` aren't spawned at sector load
+    (triggers spawn them later; `Ship_SpawnAtLoad 0x434e80`). They're drawn anyway and marked
+    in the object list.
+  - Group labels use the game's group ids: the record's group-name index looked up in
+    `SHIPTEXT.BIN` `[FLIGHT_GROUPS]` (e.g. `FG_NERGAL (227)`), the numbers triggers use.
   - Null records (decl index −1) are skipped.
   - A sub-sector's parent is the SPX whose stage table names it (`bora05A.spx` → `BORA05.SPX`).
   - **Backdrop** (`src/bdf.rs`): the sector's `.BDF` (or its parent's, for sub-sectors that leave
