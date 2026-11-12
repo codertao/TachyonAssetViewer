@@ -17,6 +17,7 @@ pub const CREATE_REPLY: u16 = 0x1031;
 pub const DESTROY_PLAYER: u16 = 0x1032;
 pub const DESTROY_REPLY: u16 = 0x1033;
 pub const CLOSE: u16 = 0x1040;
+pub const CLOSE_REPLY: u16 = 0x1041;
 pub const SERVER_CLOSING: u16 = 0x1052;
 pub const GAME_DATA: u16 = 0x1080;
 
@@ -171,6 +172,91 @@ pub fn parse_session(msg: &[u8]) -> Option<Session> {
     })
 }
 
+// ---- server side ----
+
+/// The 0x100-byte session record (`NetSock_HostSession 0x4ab570`). space.exe passes 0 for the
+/// four game-data dwords. `password` is blanked in enum replies, as Netsock does.
+pub fn session_record(name: &str, max_players: u32, players: u32, password: bool, session_guid: [u8; 16]) -> Vec<u8> {
+    let mut r = vec![0u8; 0x100];
+    r[0..4].copy_from_slice(&0x100u32.to_le_bytes());
+    r[4..8].copy_from_slice(&(7u32 | if password { 8 } else { 0 }).to_le_bytes());
+    r[8..12].copy_from_slice(&max_players.to_le_bytes());
+    r[12..16].copy_from_slice(&players.to_le_bytes());
+    r[0x10..0x90].copy_from_slice(&fixed_str(name, 128));
+    r[0xd0..0xe0].copy_from_slice(&session_guid);
+    r[0xe0..0xf0].copy_from_slice(&APP_GUID);
+    r
+}
+
+pub fn enum_reply(record: &[u8]) -> Vec<u8> {
+    message(ENUM_REPLY, record)
+}
+
+/// Join refusal reasons for 0x1021.
+pub const REFUSE_PASSWORD: u16 = 1;
+pub const REFUSE_GUID: u16 = 2;
+pub const REFUSE_FULL: u16 = 3;
+
+/// 0x1021 `{u16 status (1 accept, 2 refuse), u16 reason, u32}`.
+pub fn join_reply(accept: bool, reason: u16) -> Vec<u8> {
+    let mut b = (if accept { 1u16 } else { 2 }).to_le_bytes().to_vec();
+    b.extend_from_slice(&reason.to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    message(JOIN_REPLY, &b)
+}
+
+/// 0x1031 `{u32 result, u32 playerId}`.
+pub fn create_reply(result: u32, player_id: u32) -> Vec<u8> {
+    let mut b = result.to_le_bytes().to_vec();
+    b.extend_from_slice(&player_id.to_le_bytes());
+    message(CREATE_REPLY, &b)
+}
+
+pub fn destroy_reply() -> Vec<u8> {
+    message(DESTROY_REPLY, &0u32.to_le_bytes())
+}
+
+pub fn close_reply() -> Vec<u8> {
+    message(CLOSE_REPLY, &0u32.to_le_bytes())
+}
+
+pub fn server_closing() -> Vec<u8> {
+    message(SERVER_CLOSING, &[])
+}
+
+/// A parsed client → server session message.
+#[derive(Debug)]
+pub enum ClientMsg<'a> {
+    Enum { guid_ok: bool },
+    Join { guid_ok: bool, password: String },
+    CreatePlayer { request: u32, name: String, data: &'a [u8] },
+    DestroyPlayer { player_id: u32 },
+    Close,
+    GameData(&'a [u8]),
+    Other(u16),
+}
+
+pub fn parse_client(msg: &[u8]) -> Option<ClientMsg<'_>> {
+    let k = kind(msg);
+    let body = msg.get(4..)?;
+    Some(match k {
+        ENUM => ClientMsg::Enum { guid_ok: body.get(..16)? == APP_GUID },
+        JOIN => ClientMsg::Join { guid_ok: body.get(..16)? == APP_GUID, password: cstr(body.get(16..80)?) },
+        CREATE_PLAYER => {
+            let request = u32::from_le_bytes(body.get(..4)?.try_into().ok()?);
+            let name = cstr(body.get(4..0x84)?);
+            let size = u32::from_le_bytes(body.get(0x88..0x8c)?.try_into().ok()?) as usize;
+            // data starts at message +0xa0 = body +0x9c
+            let data = body.get(0x9c..0x9c + size).or_else(|| body.get(0x9c..))?;
+            ClientMsg::CreatePlayer { request, name, data }
+        }
+        DESTROY_PLAYER => ClientMsg::DestroyPlayer { player_id: u32::from_le_bytes(body.get(..4)?.try_into().ok()?) },
+        CLOSE => ClientMsg::Close,
+        GAME_DATA => ClientMsg::GameData(game_payload(msg)?),
+        k => ClientMsg::Other(k),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +285,24 @@ mod tests {
         assert_eq!(m.len(), 15);
         assert_eq!(u16::from_le_bytes([m[2], m[3]]), 15);
         assert_eq!(game_payload(&m), Some(&[1u8, 2, 3][..]));
+    }
+
+    #[test]
+    fn server_messages_round_trip() {
+        let rec = session_record("Test", 16, 2, true, [7; 16]);
+        let s = parse_session(&enum_reply(&rec)).unwrap();
+        assert_eq!((s.name.as_str(), s.players, s.max_players, s.password), ("Test", 2, 16, true));
+        match parse_client(&create_player(3, "Bob", &[1, 2, 3])).unwrap() {
+            ClientMsg::CreatePlayer { request, name, data } => assert_eq!((request, name.as_str(), data), (3, "Bob", &[1u8, 2, 3][..])),
+            m => panic!("{m:?}"),
+        }
+        match parse_client(&join_request("pw")).unwrap() {
+            ClientMsg::Join { guid_ok, password } => assert!(guid_ok && password == "pw"),
+            m => panic!("{m:?}"),
+        }
+        match parse_client(&game_data(&[9, 8, 7])).unwrap() {
+            ClientMsg::GameData(p) => assert_eq!(p, [9, 8, 7]),
+            m => panic!("{m:?}"),
+        }
     }
 }

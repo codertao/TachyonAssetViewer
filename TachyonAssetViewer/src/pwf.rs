@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn space_bank_has_gate_sounds() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let Ok(d) = src.read("SPACE.PWF") else { return };
         let b = Bank::parse(d).unwrap();
         assert_eq!(b.entries.len(), 334);

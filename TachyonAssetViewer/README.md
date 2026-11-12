@@ -4,8 +4,8 @@ A desktop viewer for the 3D models in _Tachyon: The Fringe_: single `.PAK` model
 composite models (capital ships, stations) and `.SPX` sectors (every object placed in a sector).
 
 ```sh
-cargo run --release -- ../pff            # extracted asset directory
-cargo run --release -- ../Tachyon.pff    # or the archive itself
+cargo run --release -- ../../pff            # extracted asset directory
+cargo run --release -- ../../GoG/Tachyon.pff    # or the archive itself
 ```
 
 You can also start it with no argument and type a path into the box at the top left.
@@ -282,7 +282,7 @@ The **Music** checkbox plays the game's in-flight music in the background (`src/
 `cargo test --release` parses all 1,160 shipped PAKs and all 91 OCFs (checking every
 referenced PAK and ATTACH parent exists), and builds all 302 sectors. It also checks that a file read from `Tachyon.pff`
 matches the extracted copy, and the Euler convention. The tests that need game data skip if
-`../pff` or `../Tachyon.pff` are missing.
+`../../pff` or `../../GoG/Tachyon.pff` are missing.
 
 ## Not done yet
 

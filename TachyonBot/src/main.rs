@@ -3,8 +3,8 @@
 
 mod engine;
 mod flight;
-mod netsock;
-mod proto;
+use tachyon_core::net::netsock;
+use tachyon_core::net::proto;
 mod world;
 
 use anyhow::{bail, Context, Result};
@@ -31,6 +31,7 @@ const USAGE: &str = "usage: TachyonBot <host[:port]> [options]
   --muzzle U         start shots U world units ahead of the ship's centre (default 12)
   --respawn S        seconds to wait before respawning after death (default 5; 0 = never)
   --track ID         log every snapshot record of entity ID (hex)
+  --say <text>       send this chat line (0x2022, to all) once startup completes; repeatable
   --verbose          log every event type, including unhandled ones
   --hexdump          print every datagram";
 
@@ -50,6 +51,7 @@ struct Args {
     muzzle: f64,
     track: Option<u32>,
     verbose: bool,
+    say: Vec<String>,
     hexdump: bool,
 }
 
@@ -72,6 +74,7 @@ fn parse_args() -> Result<Args> {
         muzzle: 12.0,
         track: None,
         verbose: false,
+        say: vec![],
         hexdump: false,
     };
     while let Some(s) = it.next() {
@@ -100,6 +103,7 @@ fn parse_args() -> Result<Args> {
             "--muzzle" => a.muzzle = val()?.parse()?,
             "--respawn" => a.respawn = val()?.parse()?,
             "--track" => a.track = Some(u32::from_str_radix(val()?.trim_start_matches("0x"), 16)?),
+            "--say" => a.say.push(val()?),
             "--verbose" => a.verbose = true,
             "--hexdump" => a.hexdump = true,
             "-h" | "--help" => {
@@ -297,6 +301,7 @@ struct Bot {
     world: World,
     circle: flight::Circle,
     verbose: bool,
+    say: Vec<String>,
     respawn_after: Option<Instant>,
     respawn_delay: f64,
     kicked: Option<u8>,
@@ -409,6 +414,18 @@ impl Bot {
             0x1111 => {
                 self.world.log("startup complete");
                 self.engine.queue(0x2012, vec![0, 0]);
+                // Chat 0x2022 `{u16 mode (0 = all), u16 target, char text[]}`, as the client
+                // sends it: prefixed with the sender's name.
+                for line in std::mem::take(&mut self.say) {
+                    let mut b = vec![0, 0, 0, 0];
+                    b.extend_from_slice(line.as_bytes());
+                    b.push(0);
+                    if b.len() & 1 != 0 {
+                        b.push(0);
+                    }
+                    self.world.log(format!("saying {line:?}"));
+                    self.engine.queue(0x2022, b);
+                }
                 // The server only relays a shot if the slot holds a weapon with ammo
                 // (`TachSrv_OnFire`), and the join blob path leaves the ammo counter at 0, so
                 // send a loadout (0x2028, applied as sent by `FUN_004607b0`).
@@ -582,6 +599,7 @@ fn main() -> Result<()> {
         world,
         circle: flight::Circle::new(a.radius, a.period),
         verbose: a.verbose,
+        say: a.say.iter().map(|l| format!("{}: {l}", a.name)).collect(),
         respawn_after: None,
         respawn_delay: a.respawn,
         kicked: None,

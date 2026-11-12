@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn stargate_poses() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let a = Anm::parse(&src.read("stargate.anm").unwrap()).unwrap();
         assert_eq!(a.n_parts, 22);
         // Closed: only the pylon bases fan out.

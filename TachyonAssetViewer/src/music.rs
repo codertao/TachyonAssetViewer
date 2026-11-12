@@ -644,8 +644,8 @@ mod tests {
 
     #[test]
     fn script_sequences_themes() {
-        let Ok(src) = AssetSource::open(Path::new("../pff")) else { return };
-        let Some(sbf) = Sbf::find(Path::new("../pff")).and_then(|p| Sbf::open(&p).ok()) else { return };
+        let Ok(src) = AssetSource::open(Path::new("../../pff")) else { return };
+        let Some(sbf) = Sbf::find(Path::new("../../pff")).and_then(|p| Sbf::open(&p).ok()) else { return };
         let s = Arc::new(Script::parse(src.read("TTFMUSIC.BIN").unwrap()).unwrap());
         assert_eq!(s.n_states(), 57);
         assert_eq!(sbf.segs.len(), 451);

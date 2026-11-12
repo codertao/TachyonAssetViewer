@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn bora05_layout() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let s = parse(&src.read("BORA05.SPX").unwrap()).unwrap();
         assert_eq!(s.backdrop, "BORA5.BDF");
         assert_eq!(s.decls.len(), 4);
@@ -368,7 +368,7 @@ mod tests {
     /// Group ids match the trigger numbering, asteroid scales and the deferred flag decode.
     #[test]
     fn neut04c_groups_scale_deferred() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let s = parse(&src.read("NEUT04C.SPX").unwrap()).unwrap();
         let g = FlightGroups::load(&src).unwrap();
         let labels: Vec<String> = s.placements.iter().filter(|p| p.group >= 0).map(|p| g.label(&s, p.group)).collect();
@@ -395,7 +395,7 @@ mod tests {
     /// Every shipped SPX parses; report how many objects resolve to a model.
     #[test]
     fn all_spx_resolve() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let mut des = DesResolver::new(&src).unwrap();
         let (mut files, mut objs, mut ok) = (0, 0, 0);
         let mut missing: HashMap<String, usize> = HashMap::new();

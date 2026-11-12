@@ -1,0 +1,9 @@
+[package]
+name = "tachyon-core"
+version = "0.1.0"
+edition = "2024"
+description = "Tachyon: The Fringe file formats and multiplayer wire protocol"
+
+[dependencies]
+anyhow = "1"
+memmap2 = "0.9"

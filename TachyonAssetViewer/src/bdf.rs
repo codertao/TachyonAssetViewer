@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn every_bdf_parses() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let mut n = 0;
         for name in src.list(&[".BDF"]) {
             let b = parse(&src.read(&name).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));

@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["tachyon-core", "TachyonServer", "TachyonBot", "TachyonAssetViewer"]
+
+# Moved here from TachyonAssetViewer/Cargo.toml: Cargo only honours profiles at the workspace root.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn archive_matches_extracted_files() {
-        let (Ok(arc), Ok(loose)) = (std::fs::read("../Tachyon.pff"), std::fs::read("../pff/CUTLESS.PAK")) else {
+        let (Ok(arc), Ok(loose)) = (std::fs::read("../../GoG/Tachyon.pff"), std::fs::read("../../pff/CUTLESS.PAK")) else {
             return;
         };
         let entries = parse_entries(&arc).unwrap();

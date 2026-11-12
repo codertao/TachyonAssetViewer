@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn bora_pal_protects_glow_range() {
-        let Ok(d) = std::fs::read("../pff/BORA.PAL") else { return };
+        let Ok(d) = std::fs::read("../../pff/BORA.PAL") else { return };
         let m = protect_mask(&d).unwrap();
         assert!(m[0] && m[236] && m[255] && !m[100]);
         assert_eq!(m.iter().filter(|&&x| x).count(), 21);

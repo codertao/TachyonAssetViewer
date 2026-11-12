@@ -479,7 +479,7 @@ pub fn parse(d: &[u8]) -> Result<Pak> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const PFF_DIR: &str = "../pff";
+    const PFF_DIR: &str = "../../pff";
 
     #[test]
     fn blend_mode_classes() {

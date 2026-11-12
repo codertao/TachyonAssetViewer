@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+tachyon-core = { path = "../tachyon-core" }

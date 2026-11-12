@@ -1172,7 +1172,7 @@ mod tests {
     /// bakes, under a rotated, scaled and offset placement (as in an OCF).
     #[test]
     fn animated_parts_match_baked_pose() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let basis = Mat3::from_engine_euler_deg([30.0, -20.0, 45.0]).scaled(2.5);
         let offset = [10.0, -4.0, 7.0];
         for name in ["SINZAP.PAK", "TORPFRTS.PAK", "STARDISC.PAK", "TRANSP02.PAK", "IBDBEACN.PAK"] {
@@ -1215,7 +1215,7 @@ mod spx_tests {
     /// Every shipped sector builds; report the slowest and the warning count.
     #[test]
     fn every_spx_scene_builds() {
-        let Ok(src) = AssetSource::open(std::path::Path::new("../pff")) else { return };
+        let Ok(src) = AssetSource::open(std::path::Path::new("../../pff")) else { return };
         let (mut worst, mut worst_name, mut warns, mut n) = (0.0f64, String::new(), 0, 0);
         for name in src.list(&[".SPX"]) {
             let t = std::time::Instant::now();

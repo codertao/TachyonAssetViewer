@@ -1,7 +1,7 @@
 //! Tachyon's game layer: the join blob, PLAYERDATA, startup records, snapshot records.
 //! Layouts are from `decomp/notes/multiplayer.md`.
 
-use crate::netsock::{cstr, fixed_str};
+use crate::net::netsock::{cstr, fixed_str};
 
 /// One world unit in 16.16 fixed point.
 pub const UNIT: f64 = 65536.0;
@@ -30,7 +30,6 @@ pub fn f16_decode(x: u16) -> i32 {
 }
 
 /// `f16_Encode 0x48e870`.
-#[cfg(test)]
 pub fn f16_encode(v: i32) -> u16 {
     let neg = v < 0;
     let u = (v ^ (v >> 31)) as u32;
@@ -207,6 +206,153 @@ pub fn name_table(rec: &[u8], two_names: bool) -> Vec<(u16, String)> {
     out
 }
 
+/// The join blob as the server reads it (`Srv_CopyPlayerInfo 0x461100`, mode join hooks).
+#[derive(Debug, Clone, Default)]
+pub struct JoinInfo {
+    /// Team-game ships: GALSPAN side (+0x00), BORA side (+0x20).
+    pub galspan_ship: String,
+    pub bora_ship: String,
+    pub preferred_team: u32,
+    pub portrait: String,
+    pub systems: u32,
+    /// Weapon id + 1 per mount (0 = empty).
+    pub mounts: [u16; 8],
+    pub voice_port: u16,
+    pub game_id: u32,
+    pub magic: u32,
+    /// Deathmatch: campaign faction (`race.cfg` index) and ship alias.
+    pub dm_team: u32,
+    pub dm_ship: String,
+}
+
+pub fn parse_join_blob(b: &[u8]) -> JoinInfo {
+    JoinInfo {
+        galspan_ship: b.get(0..0x20).map(cstr).unwrap_or_default(),
+        bora_ship: b.get(0x20..0x40).map(cstr).unwrap_or_default(),
+        preferred_team: u32_at(b, 0x40),
+        portrait: b.get(0x44..0x54).map(cstr).unwrap_or_default(),
+        systems: u32_at(b, 0x54),
+        mounts: std::array::from_fn(|i| u16_at(b, 0x58 + 2 * i)),
+        voice_port: u16_at(b, 0x68),
+        game_id: u32_at(b, 0x78),
+        magic: u32_at(b, 0x7c),
+        dm_team: u32_at(b, 0xa0),
+        dm_ship: b.get(0xa4..0xc4).map(cstr).unwrap_or_default(),
+    }
+}
+
+/// PLAYERDATA as the server reads it (`Tach_SrvReadPlayerData 0x460b30`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlayerDataIn {
+    /// Bit 0 of +0x4b: position, velocity and angles are valid.
+    pub has_ship: bool,
+    pub pos: [i32; 3],
+    pub camera: [i32; 3],
+    pub frame: u32,
+    pub target: u32,
+    pub subtarget: [u16; 2],
+    pub speed: i32,
+    /// 0..1024, or -1 with the afterburner on.
+    pub throttle: i32,
+    pub shield_rate: i32,
+    /// One-shot interaction request `{objId, action}` (0 = none).
+    pub interact: [u32; 2],
+    pub vel: [i32; 3],
+    /// 16.16 angles, 512 units per turn (the wire carries the top 8 bits).
+    pub angles: [i32; 3],
+}
+
+pub fn parse_player_data(b: &[u8]) -> Option<PlayerDataIn> {
+    if b.len() < 0x4c {
+        return None;
+    }
+    Some(PlayerDataIn {
+        has_ship: b[0x4b] & 1 != 0,
+        pos: [0, 4, 8].map(|k| i32_at(b, k)),
+        camera: [0, 4, 8].map(|k| i32_at(b, 0xc + k)),
+        frame: u32_at(b, 0x18),
+        target: u32_at(b, 0x1c),
+        subtarget: [u16_at(b, 0x20), u16_at(b, 0x22)],
+        speed: i32_at(b, 0x24),
+        throttle: i32_at(b, 0x28),
+        shield_rate: i32_at(b, 0x2c),
+        interact: [u32_at(b, 0x34), u32_at(b, 0x38)],
+        vel: [0, 4, 8].map(|k| i32_at(b, 0x3c + k)),
+        angles: [0, 1, 2].map(|k| (b[0x48 + k] as i32) << 17),
+    })
+}
+
+/// One entity in a snapshot, server side. Positions are absolute 16.16.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecordOut {
+    pub id: u32,
+    pub model: u8,
+    pub flags: u8,
+    pub throttle: u8,
+    pub team: u8,
+    pub pos: [i32; 3],
+    pub vel: [i32; 3],
+    /// 16.16 angles, 512 units per turn.
+    pub angles: [i32; 3],
+    /// Extended (flag 0x08) records: 8.8 scale and descriptor slot (-1 = plain model).
+    pub ext: Option<(u16, i16)>,
+}
+
+/// `Tach_SrvWriteEntityRecord 0x4614e0` / `...Ext`: 24 bytes, 28 with flag 0x08.
+pub fn write_record(out: &mut Vec<u8>, r: &RecordOut, origin: [i32; 3]) {
+    out.extend_from_slice(&r.id.to_le_bytes());
+    let flags = if r.ext.is_some() { r.flags | REC_PAGED } else { r.flags & !REC_PAGED };
+    out.extend_from_slice(&[r.model, flags, r.throttle, r.team]);
+    for k in 0..3 {
+        out.extend_from_slice(&f16_encode(r.pos[k].wrapping_sub(origin[k])).to_le_bytes());
+    }
+    for k in 0..3 {
+        out.extend_from_slice(&f16_encode(r.vel[k]).to_le_bytes());
+    }
+    out.extend_from_slice(&[(r.angles[0] >> 17) as u8, (r.angles[1] >> 17) as u8, (r.angles[2] >> 17) as u8, 0]);
+    if let Some((scale, desc)) = r.ext {
+        out.extend_from_slice(&scale.to_le_bytes());
+        out.extend_from_slice(&desc.to_le_bytes());
+    }
+}
+
+/// GAMEDATA status header (24 bytes, `Tach_SrvWriteGameData 0x461a30`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatusOut {
+    pub target_speed: f32,
+    /// Target hull / shield %, credits (0xff = none).
+    pub target_meters: [u8; 3],
+    pub shield_front: u16,
+    pub shield_rear: u16,
+    pub hull: u16,
+    pub field_12: u16,
+    pub one_shot_flags: u32,
+}
+
+/// Full GAMEDATA body: status header, snapshot header, records.
+pub fn write_gamedata(status: &StatusOut, origin: [i32; 3], page: (u16, u16), records: &[RecordOut]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(0x18 + 18 + records.len() * 28);
+    b.extend_from_slice(&status.target_speed.to_le_bytes());
+    b.extend_from_slice(&[status.target_meters[0], status.target_meters[1], status.target_meters[2], 0]);
+    b.extend_from_slice(&status.shield_front.to_le_bytes());
+    b.extend_from_slice(&status.shield_rear.to_le_bytes());
+    b.extend_from_slice(&status.hull.to_le_bytes());
+    b.extend_from_slice(&[0, 0]);
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&status.field_12.to_le_bytes());
+    b.extend_from_slice(&status.one_shot_flags.to_le_bytes());
+    b.extend_from_slice(&(records.len() as u16).to_le_bytes());
+    b.extend_from_slice(&page.0.to_le_bytes());
+    b.extend_from_slice(&page.1.to_le_bytes());
+    for v in origin {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    for r in records {
+        write_record(&mut b, r, origin);
+    }
+    b
+}
+
 /// `race.cfg` races, the team numbers.
 pub const RACES: [&str; 19] = [
     "agt", "bora", "galspan", "pirate", "tourist", "agt_rival", "void_pirate", "skav_pirate",
@@ -262,5 +408,26 @@ mod tests {
         r.extend_from_slice(b"a.pak\0b.pal\0");
         let t = name_table(&r, true);
         assert_eq!(t, vec![(7, "cutless.pak (bora.pal)".into()), (9, "a.pak (b.pal)".into())]);
+    }
+
+    #[test]
+    fn gamedata_round_trip() {
+        let r = RecordOut { id: 7, model: 3, flags: 2, throttle: 64, team: 1, pos: [100 << 16, -(5 << 16), 0], vel: [1000, 0, -1000], angles: [64 << 17, 0, 0], ext: Some((256, 4)) };
+        let b = write_gamedata(&StatusOut::default(), [10 << 16, 0, 0], (3, 1), &[r, RecordOut { ext: None, ..r }]);
+        let s = parse_gamedata(&b).unwrap();
+        assert_eq!((s.records.len(), s.page_list, s.page_count), (2, 3, 1));
+        assert_eq!((s.records[0].id, s.records[0].model, s.records[0].team, s.records[0].desc), (7, 3, 1, Some(4)));
+        assert!((s.records[0].pos[0] - 100.0).abs() < 0.1 && (s.records[0].pos[1] + 5.0).abs() < 0.1);
+        assert_eq!((s.records[1].desc, s.records[1].angles[0]), (None, 64));
+    }
+
+    #[test]
+    fn player_data_parse() {
+        let st = ShipState { pos: [1 << 16, 2 << 16, 3 << 16], vel: [5, 6, 7], angles: [128 << 16, 0, 0], valid: true };
+        let p = parse_player_data(&player_data(&st, 42)).unwrap();
+        assert!(p.has_ship);
+        assert_eq!((p.pos, p.vel, p.frame, p.angles[0], p.throttle), (st.pos, st.vel, 42, 128 << 16, 512));
+        let j = parse_join_blob(&join_blob(&JoinBlob { ship: "BORA_CUTLASS", team: 1, portrait: "face1", game_id: 0, weapon: 6 }));
+        assert_eq!((j.dm_ship.as_str(), j.dm_team, j.portrait.as_str(), j.mounts[0], j.magic), ("BORA_CUTLASS", 1, "face1", 7, 0x1002));
     }
 }

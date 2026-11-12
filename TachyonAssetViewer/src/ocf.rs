@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn parses_every_shipped_ocf() {
-        let Ok(rd) = std::fs::read_dir("../pff") else { return };
+        let Ok(rd) = std::fs::read_dir("../../pff") else { return };
         let files: HashMap<String, std::path::PathBuf> = rd
             .flatten()
             .map(|e| (e.file_name().to_string_lossy().to_uppercase(), e.path()))
