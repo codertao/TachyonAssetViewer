@@ -242,8 +242,8 @@ Blinking parts (26 PAKs):
 
 ## Music
 
-The **Music** checkbox plays the game's in-flight music in the background (`src/music.rs`;
-`decomp/notes/music.md`).
+The **Music** checkbox, under the pff path, plays the game's in-flight music in the background
+(`src/music.rs`; `decomp/notes/music.md`).
 - **Where it comes from:** the segments are in `Ttfmusic.sbf`, in the game folder beside
   `Tachyon.pff`. The viewer looks next to the asset source, in its parent folder, and in that
   folder's subfolders. The segments are 451 short clips of IMA ADPCM, 22,050 Hz stereo.
@@ -251,11 +251,16 @@ The **Music** checkbox plays the game's in-flight music in the background (`src/
   segment. It runs on a port of the exe's script VM, so intros, loop bars, variations and
   endings follow the game's rules.
 - **Choosing a theme:** in the game, the sector, current job, hostiles and shields choose the
-  theme. Free flight with no job mostly gets a generic filler loop. The viewer has no job, so
-  it picks a random theme (one of 23 script states), plays it until the script ends it or
-  for 4 minutes, then picks another.
-- **Status:** hovering over the checkbox shows the theme and the segment now playing.
-- **What's left out:** cutscene stingers and the dispatcher's filler.
+  theme. The viewer leaves every game variable at zero (no hostiles, no job, EARTH 0), so it
+  plays the branch of each theme that runs with no enemies around. The drop-down beside the
+  checkbox picks the script state. Each entry is named by the first segment it plays, and
+  states marked *terminal* are the dispatcher, combat bookkeeping, filler and stinger wait.
+  Picking a state restarts the script there at once, with its variables cleared.
+- **When a theme ends:** the script carries on by itself in the terminal states, which with
+  zero variables means the generic `wharmp` filler. After 45 s there, or 45 s of silence, the
+  chosen theme starts again. There's no random cycling between themes.
+- **Status:** a line under the checkbox shows the running state, the segment and, after the
+  theme ends, the countdown to its restart.
 
 ## Layout
 

@@ -361,6 +361,61 @@ impl ViewerApp {
             .collect()
     }
 
+    /// The Music checkbox, the theme picker and what's playing.
+    fn music_controls(&mut self, ui: &mut egui::Ui) {
+        let snd = &mut self.sound;
+        let now = snd.now_playing();
+        ui.horizontal(|ui| {
+            let tip = match &snd.music_error {
+                Some(e) => format!("Music unavailable: {e}"),
+                None => "In-flight music: Ttfmusic.sbf segments sequenced by the game's TTFMUSIC.BIN \
+                         script, with every game variable (hostiles, sector, job...) zero. The chosen \
+                         theme plays; when the script ends it, the script runs on in the terminal \
+                         states for a while, then the theme starts again."
+                    .into(),
+            };
+            ui.checkbox(&mut snd.music_on, "Music").on_hover_text(tip);
+            let home = snd.music_state.unwrap_or(music::THEMES[0]);
+            let label = |s: usize| {
+                snd.music_labels.iter().find(|l| l.0 == s).map_or_else(|| format!("state {s}"), |l| l.1.clone())
+            };
+            let mut pick = home;
+            // Until the music has loaded once, offer the themes by number.
+            let entries: Vec<(usize, String)> = if snd.music_labels.is_empty() {
+                music::THEMES.iter().map(|&s| (s, format!("state {s}"))).collect()
+            } else {
+                snd.music_labels.clone()
+            };
+            egui::ComboBox::from_id_salt("music_state")
+                .selected_text(label(home))
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for (s, l) in &entries {
+                        ui.selectable_value(&mut pick, *s, l);
+                    }
+                })
+                .response
+                .on_hover_text("Script state to play, named by its first segment");
+            if pick != home {
+                snd.music_state = Some(pick);
+                if let Some(m) = &snd.music {
+                    if let Ok(mut n) = m.lock() {
+                        n.select = Some(pick);
+                    }
+                }
+            }
+        });
+        if let Some(n) = now {
+            let seg = if n.segment.is_empty() { "(silence)" } else { n.segment.as_str() };
+            let mut text = format!("state {} · {seg}", n.state);
+            if n.terminal_secs > 0.0 {
+                text += &format!(" · theme {} again in {:.0} s", n.home, (music::TERMINAL_SECONDS - n.terminal_secs).max(0.0));
+            }
+            ui.small(text);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Right-to-left so the button is placed first and the text box takes exactly the
@@ -386,6 +441,7 @@ impl ViewerApp {
                 src.path.display(),
                 self.entries.len()
             ));
+            self.music_controls(ui);
         }
         ui.separator();
         ui.horizontal(|ui| {
@@ -532,21 +588,6 @@ impl ViewerApp {
                     "Gate sounds from SPACE.PWF: each gate's ambient loop, plus the open / close \
                      animation sounds while cycling",
                 );
-            }
-            if self.source.is_some() {
-                let tip = match (&self.sound.music_error, self.sound.now_playing()) {
-                    (Some(e), _) => format!("Music unavailable: {e}"),
-                    (None, Some(n)) => format!(
-                        "In-flight music: Ttfmusic.sbf segments sequenced by the game's TTFMUSIC.BIN script. \
-                         A random theme plays (script state {}), then another.\nNow: {}",
-                        n.theme, n.segment
-                    ),
-                    (None, None) => "In-flight music from Ttfmusic.sbf, sequenced by the game's TTFMUSIC.BIN script".into(),
-                };
-                ui.checkbox(&mut self.sound.music_on, "Music").on_hover_text(tip);
-                if self.sound.music.is_some() {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-                }
             }
             if self.fog.is_some() {
                 ui.checkbox(&mut self.show_fog, "Fog")
@@ -778,6 +819,10 @@ struct GateAudio {
     music_on: bool,
     music: Option<Arc<Mutex<music::NowPlaying>>>,
     music_error: Option<String>,
+    /// The theme picked in the UI (`None`: the first of `music::THEMES`).
+    music_state: Option<usize>,
+    /// The picker's entries, filled when the music first starts.
+    music_labels: Vec<(usize, String)>,
 }
 
 impl GateAudio {
@@ -796,10 +841,13 @@ impl GateAudio {
                     let sbf = Arc::new(music::Sbf::open(&path)?);
                     let script = Arc::new(music::Script::parse(src.read("TTFMUSIC.BIN")?)?);
                     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32);
-                    Ok(music::Player::new(sbf, script, seed))
+                    Ok(music::Player::new(sbf, script, seed, self.music_state.unwrap_or(music::THEMES[0])))
                 })();
                 match (player, self.audio().is_some()) {
                     (Ok(p), true) => {
+                        if self.music_labels.is_empty() {
+                            self.music_labels = p.state_labels();
+                        }
                         self.music = Some(p.now.clone());
                         if let Some(a) = self.audio() {
                             a.set_music(Some(Box::new(p)));

@@ -4,9 +4,9 @@
 //! The game streams one segment at a time (`FUN_004b53b0`). When a segment runs out it runs the
 //! script (`FUN_004b5b80`), which picks the next one: an interactive score where each script
 //! state is a theme (intro, loop bars, ending) and the game's variables (sector, job, hostiles,
-//! shields) choose between themes. The viewer has no job or hostiles, so it picks a random
-//! theme, lets the script sequence it, and moves on to another when the theme ends or has
-//! played for a while.
+//! shields) choose between themes. The viewer has no job or hostiles (every game variable is
+//! zero), so the UI picks a theme. The script sequences it, and when it ends, the player lets
+//! the script run on in the terminal states for a while, then starts the chosen theme again.
 
 use crate::audio::Stream;
 use anyhow::{bail, ensure, Context, Result};
@@ -168,7 +168,6 @@ impl Script {
         })
     }
 
-    #[cfg(test)]
     pub fn n_states(&self) -> usize {
         self.states.len()
     }
@@ -480,21 +479,34 @@ impl Vm {
 /// bookkeeping states (0–3, 20, 22, 23, 44, 45, 54, 56), cutscene and story stingers
 /// (21, 37–42), and duplicates that only differ in what game state they wait for.
 pub const THEMES: &[usize] = &[4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 16, 17, 19, 24, 28, 30, 31, 33, 46, 47, 49, 50, 51];
-/// States that mean "this theme is over" (back to the dispatcher or the generic filler).
-const ENDED: &[usize] = &[0, 1, 2, 3, 44, 45, 56];
-/// Move on after this long in one theme.
-const THEME_SECONDS: f32 = 240.0;
+/// States that mean "this theme is over": the init state, the dispatcher, the combat/resume
+/// bookkeeping, the generic filler and the stinger wait.
+pub const TERMINAL: &[usize] = &[0, 1, 2, 3, 44, 45, 56];
+/// How long to let the script run on its own after the chosen theme ends (in the terminal
+/// states, or silent), before starting the chosen theme again.
+pub const TERMINAL_SECONDS: f32 = 45.0;
+/// Script passes without a segment before the player fills a block of silence.
+const IDLE_PASSES: usize = 256;
 
-/// What's playing, for the UI.
+/// What's playing, plus the UI's request. Shared between the UI and the audio thread.
 #[derive(Clone, Default)]
 pub struct NowPlaying {
-    pub theme: usize,
+    /// The theme chosen in the UI.
+    pub home: usize,
+    /// The script state now running.
+    pub state: usize,
+    /// The segment now playing (empty while silent).
     pub segment: String,
+    /// Seconds spent in terminal states since the theme ended.
+    pub terminal_secs: f32,
+    /// Set by the UI to switch theme; the player takes it on its next block.
+    pub select: Option<usize>,
 }
 
 pub struct Player {
     sbf: Arc<Sbf>,
     vm: Vm,
+    home: usize,
     seg: Option<usize>,
     block: usize,
     frames: Vec<[f32; 2]>,
@@ -502,69 +514,103 @@ pub struct Player {
     /// Volume ramp across the segment (0..255).
     vol_from: f32,
     vol_to: f32,
-    theme_frames: usize,
+    /// The current block is silence (the script yielded without choosing a segment).
+    silent: bool,
+    /// Frames played since the chosen theme ended (terminal states or silence).
+    terminal_frames: usize,
     pub now: Arc<Mutex<NowPlaying>>,
     pub gain: Arc<Mutex<f32>>,
 }
 
 impl Player {
-    pub fn new(sbf: Arc<Sbf>, script: Arc<Script>, seed: u32) -> Player {
+    pub fn new(sbf: Arc<Sbf>, script: Arc<Script>, seed: u32, home: usize) -> Player {
         let mut p = Player {
             sbf,
             vm: Vm::new(script, seed),
+            home,
             seg: None,
             block: 0,
             frames: vec![],
             pos: 0.0,
             vol_from: 255.0,
             vol_to: 255.0,
-            theme_frames: 0,
+            silent: false,
+            terminal_frames: 0,
             now: Arc::default(),
             gain: Arc::new(Mutex::new(0.6)),
         };
-        p.new_theme();
+        p.select(home);
         p
     }
 
-    fn new_theme(&mut self) {
-        let mut t = THEMES[(self.vm.rand() as usize >> 3) % THEMES.len()];
-        if t == self.vm.state {
-            t = THEMES[(THEMES.iter().position(|&x| x == t).unwrap_or(0) + 1) % THEMES.len()];
-        }
-        self.vm.goto(t);
-        self.theme_frames = 0;
+    /// Every state with code, labelled with the first segment the script plays from it (with
+    /// all game variables zero), for the UI's picker.
+    pub fn state_labels(&self) -> Vec<(usize, String)> {
+        let s = &self.vm.s;
+        (0..s.n_states())
+            .filter(|&i| s.states[i] != 0)
+            .map(|i| {
+                let mut vm = Vm::new(s.clone(), 1);
+                vm.goto(i);
+                let first = (0..2000).find_map(|_| vm.run().ok().flatten());
+                let seg = first.and_then(|n| self.sbf.segs.get(n)).map_or("silent", |s| s.0.as_str());
+                let kind = if TERMINAL.contains(&i) {
+                    " (terminal)"
+                } else if THEMES.contains(&i) {
+                    ""
+                } else {
+                    " (other)"
+                };
+                (i, format!("{i}: {seg}{kind}"))
+            })
+            .collect()
+    }
+
+    /// Start `state` from its top with fresh script variables, cutting off what's playing.
+    fn select(&mut self, state: usize) {
+        self.home = state;
+        self.vm.mem.iter_mut().for_each(|b| *b = 0);
+        self.vm.volume = 255;
+        self.vm.target = 255;
+        self.vm.goto(state);
+        self.seg = None;
+        self.block = 0;
+        self.frames.clear();
+        self.pos = 0.0;
+        self.terminal_frames = 0;
         if let Ok(mut n) = self.now.lock() {
-            n.theme = t;
+            n.home = state;
+            n.state = self.vm.state;
+            n.segment.clear();
+            n.terminal_secs = 0.0;
         }
     }
 
-    /// The current segment ran out: ask the script for the next.
-    fn next_segment(&mut self) {
-        if self.theme_frames as f32 > THEME_SECONDS * RATE as f32 {
-            self.new_theme();
-        }
-        for _ in 0..256 {
-            if ENDED.contains(&self.vm.state) {
-                self.new_theme();
+    /// The current segment ran out: ask the script for the next. `false` when the script only
+    /// yielded (the game then streams nothing until a later pass picks a segment).
+    fn next_segment(&mut self) -> bool {
+        for _ in 0..IDLE_PASSES {
+            if self.terminal_frames as f32 > TERMINAL_SECONDS * RATE as f32 {
+                self.select(self.home);
             }
             match self.vm.run() {
-                Ok(Some(n)) if n < self.sbf.segs.len() => {
-                    self.start(n);
-                    return;
-                }
                 // The game plays segment 0 for an index past the end (FUN_004b5320).
-                Ok(Some(_)) => {
-                    self.start(0);
-                    return;
+                Ok(Some(n)) => {
+                    let n = if n < self.sbf.segs.len() { n } else { 0 };
+                    // A zero-length segment ends at once; the game runs the script again.
+                    if self.sbf.segs[n].2 >= BLOCK {
+                        self.start(n);
+                        return true;
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
                     eprintln!("music: {e}");
-                    self.new_theme();
+                    self.select(self.home);
                 }
             }
         }
-        self.new_theme();
+        false
     }
 
     fn start(&mut self, n: usize) {
@@ -577,6 +623,7 @@ impl Player {
         self.frames.clear();
         if let Ok(mut now) = self.now.lock() {
             now.segment = self.sbf.segs[n].0.clone();
+            now.state = self.vm.state;
         }
     }
 
@@ -590,21 +637,42 @@ impl Player {
     }
 
     fn load_block(&mut self) {
-        loop {
-            if self.seg.is_none() || self.block >= self.seg_blocks() {
-                self.next_segment();
-                if self.seg_blocks() == 0 {
-                    self.seg = None;
-                    continue;
+        let req = self.now.lock().ok().and_then(|mut n| n.select.take());
+        if let Some(t) = req {
+            self.select(t);
+        }
+        self.silent = false;
+        if self.seg.is_none() || self.block >= self.seg_blocks() {
+            if !self.next_segment() {
+                self.seg = None;
+                self.silent = true;
+                if let Ok(mut now) = self.now.lock() {
+                    now.segment.clear();
                 }
-            }
-            let (_, off, _) = self.sbf.segs[self.seg.unwrap()];
-            let o = off + self.block * BLOCK;
-            decode_block(&self.sbf.map[o..o + BLOCK], &mut self.frames);
-            self.block += 1;
-            if !self.frames.is_empty() {
+                self.frames.resize(BLOCK_FRAMES, [0.0; 2]);
                 return;
             }
+        }
+        let (_, off, _) = self.sbf.segs[self.seg.unwrap()];
+        let o = off + self.block * BLOCK;
+        decode_block(&self.sbf.map[o..o + BLOCK], &mut self.frames);
+        self.block += 1;
+        if self.frames.is_empty() {
+            self.frames.resize(BLOCK_FRAMES, [0.0; 2]);
+        }
+    }
+
+    /// Account for a finished block: time after the chosen theme ended counts towards
+    /// restarting it.
+    fn block_done(&mut self, frames: usize) {
+        if self.silent || TERMINAL.contains(&self.vm.state) {
+            self.terminal_frames += frames;
+        } else {
+            self.terminal_frames = 0;
+        }
+        if let Ok(mut n) = self.now.lock() {
+            n.state = self.vm.state;
+            n.terminal_secs = self.terminal_frames as f32 / RATE as f32;
         }
     }
 }
@@ -630,8 +698,9 @@ impl Stream for Player {
             self.pos += step;
             if self.pos as usize >= self.frames.len() {
                 self.pos -= self.frames.len() as f64;
-                self.theme_frames += self.frames.len();
+                let n = self.frames.len();
                 self.frames.clear();
+                self.block_done(n);
             }
         }
     }
@@ -680,5 +749,65 @@ mod tests {
         let mut b = vec![];
         decode_block(&sbf.map[off + 11 * BLOCK..off + 12 * BLOCK], &mut b);
         assert!((a.last().unwrap()[0] - b[0][0]).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::*;
+    use crate::source::AssetSource;
+
+    /// Drive the player for `secs` of audio; returns (state, segment) at each segment change.
+    fn trace(home: usize, secs: f32) -> Option<Vec<(usize, String)>> {
+        let src = AssetSource::open(Path::new("../../pff")).ok()?;
+        let sbf = Arc::new(Sbf::open(&Sbf::find(Path::new("../../pff"))?).ok()?);
+        let s = Arc::new(Script::parse(src.read("TTFMUSIC.BIN").ok()?).ok()?);
+        let mut p = Player::new(sbf, s, 0xbabeface, home);
+        let mut buf = vec![0.0f32; 2 * 4096];
+        let mut out: Vec<(usize, String)> = vec![];
+        for _ in 0..(secs * RATE as f32 / 4096.0) as usize {
+            p.fill(&mut buf, RATE);
+            let n = p.now.lock().unwrap().clone();
+            let seg = if n.segment.is_empty() { "-".to_string() } else { n.segment };
+            if out.last().map_or(true, |l| l.1 != seg) {
+                out.push((n.state, seg));
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn theme_ends_idles_and_restarts() {
+        let Some(t) = trace(31, 300.0) else { return };
+        if std::env::var("TAV_TRACE").is_ok() {
+            eprintln!("{t:?}");
+        }
+        assert_eq!(t[0].1, "LTBrND01");
+        // With no hostiles state 31 keeps looping its peaceful bars.
+        assert!(t.iter().any(|x| x.1 == "LTSyn01"));
+    }
+
+    #[test]
+    fn terminal_states_then_home() {
+        // State 44 is the generic filler: terminal from the start, so after TERMINAL_SECONDS the
+        // player restarts it (wharmp1 again).
+        let Some(t) = trace(44, TERMINAL_SECONDS + 30.0) else { return };
+        if std::env::var("TAV_TRACE").is_ok() {
+            eprintln!("{t:?}");
+        }
+        assert!(t.iter().filter(|x| x.1 == "wharmp1").count() >= 2);
+    }
+
+    #[test]
+    fn stinger_ends_then_home() {
+        // State 37 (BorVic) is a stinger: it ends in state 56, which (all variables zero) falls
+        // to the dispatcher and the generic filler; after TERMINAL_SECONDS the stinger replays.
+        let Some(t) = trace(37, 150.0) else { return };
+        if std::env::var("TAV_TRACE").is_ok() {
+            eprintln!("{t:?}");
+        }
+        assert_eq!(t.iter().filter(|x| x.1 == "BorVic1").count(), 2);
+        assert!(t.iter().any(|x| x.0 == 44));
+        assert!(!t.iter().any(|x| x.0 == 37 && x.1.starts_with("wharmp")));
     }
 }
